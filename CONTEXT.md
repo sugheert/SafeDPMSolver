@@ -9,7 +9,7 @@ Recent derivations provided in `SafeDiffusionDerivationsWithSoftplus.pdf` (Secti
 
 ## Current Codebase State
 - **Primary Mathematics**: Defined mainly in `CBF/trajectory_cbf.py`. It currently implements the legacy `logsumexp`-based CBF without the newly proposed `softplus` gating.
-- **Modularity**: Much of the project's logic is tightly coupled inside the Jupyter notebooks (`notebooks/train_and_sample_circles.ipynb` and `notebooks/train_and_sample.ipynb`). This includes data loaders, diffusion schedules, the neural network configuration, training loops, the Ancestral Sampler (`EulerMaruyamaSamplerCBF`), and plotting helpers.
+- **Modularity**: Much of the project's logic is tightly coupled inside the Jupyter notebooks (`notebooks/train_and_sample_circles_copy.ipynb` ). This includes data loaders, diffusion schedules, the neural network configuration, training loops, the Ancestral Sampler (`EulerMaruyamaSamplerCBF`), and plotting helpers.
 - **Stored Models**: There are three pre-trained score network checkpoints available in the `checkpoints/` directory:
   - `ve_unet_100k.pt`
   - `ve_unet_56k.pt`

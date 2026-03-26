@@ -26,6 +26,7 @@ conda activate py_3_10
 This project is **notebook-driven**. Primary development and experimentation happen in:
 - `notebooks/train_and_sample.ipynb` — training/sampling on MPD environments (e.g., `EnvDense2D-RobotPointMass`)
 - `notebooks/train_and_sample_circles.ipynb` — training/sampling on circles-only environments
+- `notebooks/train_and_sample_circles_copy.ipynb` — training/sampling on circles-only environments: the latest version
 
 Run notebooks from the `notebooks/` directory; they use `os.getcwd()` to construct paths to checkpoints and project root.
 

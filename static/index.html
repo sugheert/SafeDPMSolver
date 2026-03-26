@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SafeDPMSolver — CBF Trajectory Visualiser</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════ TOOLBAR ══ -->
+<div id="toolbar">
+  <span class="app-title">SafeDPM Visualiser</span>
+
+  <label for="model-select">Model</label>
+  <select id="model-select"><option value="">Loading…</option></select>
+
+  <label for="n-steps-input">Steps</label>
+  <input id="n-steps-input" type="number" value="20" min="5" max="200" step="1" />
+
+  <button id="run-btn">&#9654; Run</button>
+
+  <label for="step-scrubber">Step&nbsp;<span id="step-label">0</span></label>
+  <input id="step-scrubber" type="range" min="0" max="20" value="0" step="1" disabled />
+</div>
+
+<!-- ═══════════════════════════════════════════════ MAIN CONTENT ══ -->
+<div id="main">
+
+  <!-- ── Trajectory Canvas ── -->
+  <div id="canvas-container">
+    <div id="loading-overlay"><div class="spinner"></div><span>Running…</span></div>
+    <svg id="canvas-svg"></svg>
+  </div>
+
+  <!-- ── Step Inspector ── -->
+  <div id="inspector">
+    <div id="hxt-summary">
+      <span>h(X<sub>t</sub>)&nbsp;=&nbsp;</span>
+      <span id="hxt-value" class="hxt-neutral">—</span>
+    </div>
+    <div id="inspector-scroll">
+      <table id="inspector-table">
+        <thead>
+          <tr>
+            <th>i</th>
+            <th>d<sub>i</sub></th>
+            <th>d̃<sub>i</sub></th>
+            <th>h(w<sub>i</sub>)</th>
+            <th>σ<sub>i</sub></th>
+            <th>∂x</th>
+            <th>∂y</th>
+            <th><strong>|∇|</strong></th>
+          </tr>
+        </thead>
+        <tbody id="inspector-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════ PARAMETER CONTROLS ══ -->
+<div id="param-controls">
+
+  <div class="param-group">
+    <label for="c-slider">c&nbsp;<small>(transform sharpness)</small></label>
+    <input id="c-slider" type="range" min="0.05" max="5" step="0.05" value="1.0" />
+    <span id="c-val" class="param-val">1.00</span>
+  </div>
+
+  <div class="param-group disabled">
+    <label for="k1-slider">k₁&nbsp;<small>(obstacle temp — N/A)</small></label>
+    <input id="k1-slider" type="range" min="0.1" max="5" step="0.1" value="1.0" disabled />
+    <span id="k1-val" class="param-val">1.00</span>
+  </div>
+
+  <div class="param-group">
+    <label for="k2-input">k₂&nbsp;<small>(waypoint temp)</small></label>
+    <input id="k2-input" type="number" min="0.01" step="0.1" value="1.0" />
+  </div>
+
+  <div class="param-group">
+    <label for="r-slider">r&nbsp;<small>(obstacle radius)</small></label>
+    <input id="r-slider" type="range" min="0.2" max="3.5" step="0.05" value="0.3" />
+    <span id="r-val" class="param-val">0.30</span>
+  </div>
+
+  <div class="param-group">
+    <label for="gd-slider">γ<sub>δ</sub>&nbsp;<small>(safety margin)</small></label>
+    <input id="gd-slider" type="range" min="0" max="0.5" step="0.01" value="0.05" />
+    <span id="gd-val" class="param-val">0.05</span>
+  </div>
+
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
