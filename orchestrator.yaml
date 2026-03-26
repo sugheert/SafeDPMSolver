@@ -1,0 +1,32 @@
+agents:
+  requirements_gatherer:
+    cli: gemini
+    model: null
+    extra_args: []
+  context_generator:
+    cli: gemini
+    model: null
+    extra_args: []
+  planner:
+    cli: claude
+    model: claude-sonnet-4-6
+    extra_args: []
+  coder:
+    cli: claude
+    model: claude-sonnet-4-6 
+    max_parallel: 3
+    extra_args: []
+  git_handler:
+    cli: copilot
+    model: null
+    extra_args: []
+execution:
+  mode: sequential
+  auto_commit: false
+  auto_test: true
+paths:
+  workspace: .orchestrator
+  requirements_file: REQUIREMENTS.md
+  context_file: CONTEXT.md
+  plan_file: PLAN.md
+  logs_dir: .orchestrator/logs
