@@ -88,6 +88,10 @@ def dpm_solver_1_sample(
         eps_pred = model(x, sig_cur.expand(B), x_start, x_goal)  # [B, T, 2]
         x = x - (sig_cur - sig_next) * eps_pred
 
+        # Inpainting: re-pin start and goal waypoints
+        x[:, 0, :]  = x_start
+        x[:, -1, :] = x_goal
+
         if return_history:
             history.append(x.clone())
 
@@ -115,36 +119,45 @@ def _cbf_control_term(
     c: float,
     alpha0: float,
     gamma_delta: float,
+    use_softplus: bool = True,
     eps: float = 1e-8,
-) -> torch.Tensor:
+) -> tuple:
     """
     Compute CBF control correction for a single trajectory [T, 2].
 
     VE-case safe DPM-Solver-1 update (eq. 75):
-        ctrl = sigma_dot * min(0, omega) / (||grad_h||^2 + 1/rho * h^2 + eps) * grad_h
-             * (noise_idx - noise_idx_next)           [step-size scaling]
+        ctrl = min(0, omega) / (||grad_h||^2 + 1/rho * h^2 + eps) * grad_h * sigma_delta
 
     where:
-        omega = sigma_dot * (grad_h · eps_pred) + alpha0 * h
-        rho   = max(0, noise_idx - n_steps/2)        [regularisation schedule]
+        omega       = sigma_dot * (grad_h · eps_pred) + alpha0 * h
+        sigma_delta = sig_cur - sig_next
+        rho         = max(0, noise_idx - n_steps/2)   [regularisation schedule]
 
     Returns:
-        ctrl : [T, 2]  — subtract this from x_new (x_new = x_new - ctrl)
+        ctrl        : [T, 2]  — subtract this from x_new
+        omega_val   : float   — scalar omega (for inspector display)
+        ctrl_raw    : [T, 2]  — ctrl before multiplying by sigma_delta
     """
-    h_val  = trajectory_cbf(Xt, obstacles, k1, k2, gamma_delta, c)
-    grad_h = grad_hXt_dXt(Xt, obstacles, k1, k2, gamma_delta, c)    # [T, 2]
+    h_val  = trajectory_cbf(Xt, obstacles, k1, k2, gamma_delta, c, use_softplus)
+    grad_h = grad_hXt_dXt(Xt, obstacles, k1, k2, gamma_delta, c, use_softplus)  # [T, 2]
 
-    omega     = (grad_h * (sigma_dot * eps_pred)).sum() + alpha0 * h_val
+
+    sigma_delta = float(sig_cur - sig_next)
+    step_delta =  noise_idx_next - noise_idx
+
+
+    omega     = (grad_h * (sigma_dot*eps_pred)).sum() + alpha0 * h_val
     omega_neg = torch.clamp(omega, max=0.0)
 
-    rho = max(0.0, noise_idx - n_steps / 2.0)
+    rho = max(0.0, noise_idx - n_steps / 4.0)
     if rho > 0.0:
         denom = (grad_h * grad_h).sum() + (1.0 / rho) * h_val ** 2 + eps
     else:
         denom = (grad_h * grad_h).sum() + eps
 
-    step_delta = float(noise_idx - noise_idx_next)
-    return (omega_neg / denom) * grad_h * step_delta
+    ctrl_raw    = (omega_neg / denom) * grad_h          # [T, 2]  before sigma_delta
+    ctrl        = ctrl_raw * 0.2                 # [T, 2]  final correction
+    return ctrl, omega.item(), ctrl_raw, sigma_delta
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +178,7 @@ def dpm_solver_1_cbf_sample(
     c: float = 1.0,
     alpha0: float = 1.0,
     gamma_delta: float = 0.0,
+    use_softplus: bool = True,
     device: str = 'cpu',
     x_init: torch.Tensor = None,  # [B, T, 2] shared prior
     return_history: bool = False,
@@ -215,11 +229,16 @@ def dpm_solver_1_cbf_sample(
     cbf_history   = [] if return_history else None
 
     if return_history:
-        # Compute CBF metrics at step 0 (pure noise prior)
-        cbf_history.append(
-            compute_cbf_metrics(x[0], obstacles, c, k1, k2, gamma_delta)
-            if has_obstacles else _empty_cbf_metrics(T_steps)
-        )
+        # Step 0: pure noise prior — no control applied yet
+        m0 = (compute_cbf_metrics(x[0], obstacles, c, k1, k2, gamma_delta)
+              if has_obstacles else _empty_cbf_metrics(T_steps))
+        m0['omega']    = None
+        m0['ctrl_x']   = [0.0] * T_steps
+        m0['ctrl_y']   = [0.0] * T_steps
+        m0['ctrl_raw_x']  = [0.0] * T_steps
+        m0['ctrl_raw_y']  = [0.0] * T_steps
+        m0['sigma_delta'] = 0.0
+        cbf_history.append(m0)
 
     for step_i in range(n_steps):
         sig_cur  = sigma_seq[step_i]
@@ -230,29 +249,43 @@ def dpm_solver_1_cbf_sample(
         # Base DPM-Solver-1 step
         x_new = x - (sig_cur - sig_next) * eps_pred
 
-        # CBF correction per sample
+        # CBF correction per sample — capture b=0 values for inspector
+        ctrl_b0, omega_b0, ctrl_raw_b0, sigma_delta_b0 = None, None, None, None
         if has_obstacles:
-            sigma_dot = ve_diffusion.sigma_dot(sig_cur).item()
+            sigma_dot      = ve_diffusion.sigma_dot(sig_cur).item()
             noise_idx      = indices[step_i].item()
             noise_idx_next = indices[step_i + 1].item()
 
             for b in range(B):
-                ctrl = _cbf_control_term(
+                ctrl, omega_val, ctrl_raw, sigma_delta = _cbf_control_term(
                     x[b], eps_pred[b],
                     sig_cur.item(), sig_next.item(), sigma_dot,
                     noise_idx, noise_idx_next, n_steps,
-                    obstacles, k1, k2, c, alpha0, gamma_delta,
+                    obstacles, k1, k2, c, alpha0, gamma_delta, use_softplus,
                 )
                 x_new[b] = x_new[b] - ctrl
+                if b == 0:
+                    ctrl_b0, omega_b0, ctrl_raw_b0, sigma_delta_b0 = ctrl.clone(), omega_val, ctrl_raw.clone(), sigma_delta
+
+        # Inpainting: re-pin start and goal waypoints
+        x_new[:, 0, :]  = x_start
+        x_new[:, -1, :] = x_goal
 
         x = x_new
 
         if return_history:
             traj_history.append(x.clone())
-            cbf_history.append(
-                compute_cbf_metrics(x[0], obstacles, c, k1, k2, gamma_delta)
-                if has_obstacles else _empty_cbf_metrics(T_steps)
-            )
+            if has_obstacles:
+                m = compute_cbf_metrics(x[0], obstacles, c, k1, k2, gamma_delta, use_softplus)
+                m['omega']      = omega_b0
+                m['ctrl_x']       = ctrl_b0[:, 0].tolist()
+                m['ctrl_y']       = ctrl_b0[:, 1].tolist()
+                m['ctrl_raw_x']   = ctrl_raw_b0[:, 0].tolist()
+                m['ctrl_raw_y']   = ctrl_raw_b0[:, 1].tolist()
+                m['sigma_delta']  = sigma_delta_b0
+            else:
+                m = _empty_cbf_metrics(T_steps)
+            cbf_history.append(m)
 
     if return_history:
         return x, traj_history, cbf_history
@@ -265,11 +298,17 @@ def dpm_solver_1_cbf_sample(
 
 def _empty_cbf_metrics(T: int) -> dict:
     return {
-        'h_Xt':    0.0,
-        'd_raw':   [0.0] * T,
-        'd_tilde': [0.0] * T,
-        'h_wi':    [0.0] * T,
-        'sigma_i': [1.0 / T] * T,
-        'grad_x':  [0.0] * T,
-        'grad_y':  [0.0] * T,
+        'h_Xt':      0.0,
+        'd_raw':     [0.0] * T,
+        'd_tilde':   [0.0] * T,
+        'h_wi':      [0.0] * T,
+        'sigma_i':   [1.0 / T] * T,
+        'grad_x':    [0.0] * T,
+        'grad_y':    [0.0] * T,
+        'omega':     None,
+        'ctrl_x':    [0.0] * T,
+        'ctrl_y':    [0.0] * T,
+        'ctrl_raw_x': [0.0] * T,
+        'ctrl_raw_y': [0.0] * T,
+        'sigma_delta': 0.0,
     }

@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SafeDPMSolver — UMaze Visualiser</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════ TOOLBAR ══ -->
+<div id="toolbar">
+  <span class="app-title">SafeDPM UMaze</span>
+
+  <label for="model-select">Model</label>
+  <select id="model-select"><option value="">Loading…</option></select>
+
+  <label for="n-steps-input">Steps</label>
+  <input id="n-steps-input" type="number" value="20" min="5" max="200" step="1" />
+
+  <button id="run-btn">&#9654;&nbsp;Run</button>
+
+  <div class="scrubber-group">
+    <button id="step-prev" class="step-btn" title="Previous step (←)">&#8592;</button>
+    <label for="step-scrubber">Step&nbsp;<span id="step-label">0</span>&nbsp;/&nbsp;<span id="step-max">0</span></label>
+    <input id="step-scrubber" type="range" min="0" max="20" value="0" step="1" disabled />
+    <button id="step-next" class="step-btn" title="Next step (→)">&#8594;</button>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════ MAIN ══ -->
+<div id="main">
+
+  <!-- ── Plain DPM Canvas (left) ── -->
+  <div class="canvas-panel" id="panel-plain">
+    <div class="canvas-title plain-title" id="plain-title">Plain DPM &mdash; Uncontrolled<span id="plain-time" class="sample-time"></span></div>
+    <div class="canvas-container" id="plain-container">
+      <svg id="plain-svg"></svg>
+    </div>
+  </div>
+
+  <!-- ── Resize handle between plain and safe ── -->
+  <div id="plain-resize-handle" class="resize-handle" title="Drag to resize"></div>
+
+  <!-- ── Safe DPM Canvas (middle) ── -->
+  <div class="canvas-panel" id="panel-safe">
+    <div class="canvas-title safe-title" id="safe-title">Safe DPM &mdash; CBF Controlled<span id="safe-time" class="sample-time"></span></div>
+    <div class="canvas-container" id="safe-container">
+      <div id="loading-overlay"><div class="spinner"></div><span>Running…</span></div>
+      <svg id="safe-svg"></svg>
+    </div>
+  </div>
+
+  <!-- ── Resize handle between safe and inspector ── -->
+  <div id="inspector-resize-handle" class="resize-handle" title="Drag to resize inspector"></div>
+
+  <!-- ── Step Inspector (right) ── -->
+  <div id="inspector">
+    <div id="hxt-summary">
+      <span>h(X<sub>t</sub>)&nbsp;=&nbsp;</span>
+      <span id="hxt-value" class="hxt-neutral">—</span>
+      <span class="summary-sep">|</span>
+      <span class="summary-label">ω&nbsp;=&nbsp;</span>
+      <span id="omega-value" class="hxt-neutral">—</span>
+    </div>
+    <div id="inspector-scroll">
+      <table id="inspector-table">
+        <thead>
+          <tr>
+            <th>i</th>
+            <th>d<sub>raw</sub></th>
+            <th>d̃</th>
+            <th>h(w<sub>i</sub>)</th>
+            <th>σ<sub>i</sub></th>
+            <th>∂h/∂x</th>
+            <th>∂h/∂y</th>
+            <th>|∇h|</th>
+            <th>σ_Δ</th>
+            <th>ctrl_x</th>
+            <th>ctrl_y</th>
+            <th>ctrl_x₀</th>
+            <th>ctrl_y₀</th>
+          </tr>
+        </thead>
+        <tbody id="inspector-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<!-- ═══════════════════════════════════════════ PARAMS ══ -->
+<div id="param-controls">
+
+  <div class="param-group">
+    <label>c <small>(sharpness)</small></label>
+    <input id="c-slider" type="range" min="0.05" max="5" step="0.05" value="1.0" />
+    <span id="c-val" class="param-val">1.00</span>
+  </div>
+
+  <div class="param-group disabled">
+    <label>k₁ <small>(obstacle temp — N/A)</small></label>
+    <input id="k1-slider" type="range" min="0.1" max="5" step="0.1" value="1.0" disabled />
+    <span id="k1-val" class="param-val">1.00</span>
+  </div>
+
+  <div class="param-group">
+    <label>k₂ <small>(waypoint temp)</small></label>
+    <input id="k2-input" type="number" min="0.01" step="0.01" value="1.0" />
+  </div>
+
+  <div class="param-group">
+    <label>α₀ <small>(CBF rate)</small></label>
+    <input id="alpha0-input" type="number" min="0.0" step="0.1" value="1.0" />
+  </div>
+
+  <div class="param-group">
+    <label>r <small>(radius)</small></label>
+    <input id="r-slider" type="range" min="0.1" max="3.5" step="0.05" value="0.1" />
+    <span id="r-val" class="param-val">0.30</span>
+  </div>
+
+  <div class="param-group">
+    <label>γ<sub>δ</sub> <small>(safety margin)</small></label>
+    <input id="gd-slider" type="range" min="0" max="0.5" step="0.01" value="0" />
+    <span id="gd-val" class="param-val">0.05</span>
+  </div>
+
+  <label class="toggle-label">
+    <input id="softplus-check" type="checkbox" checked />
+    softplus
+  </label>
+
+  <button id="save-defaults-btn" title="Save current parameters as defaults (persists across refreshes)">
+    ★ Save as Default
+  </button>
+
+  <div class="param-hint">
+    Drag waypoint&nbsp;— move &nbsp;|&nbsp; Ctrl+drag&nbsp;— spline bend &nbsp;|&nbsp; ← → keys&nbsp;— step
+  </div>
+
+</div>
+
+<div id="wp-tooltip"></div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

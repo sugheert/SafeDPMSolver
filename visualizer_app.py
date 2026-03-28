@@ -95,8 +95,9 @@ def _load_model(model_name: str):
 
     ve = VEDiffusion(model=ema_model, **ckpt['ve_cfg']).to(DEVICE)
 
-    _model_cache[model_name] = (ema_model, ve)
-    return ema_model, ve
+    T_steps = ckpt['model_cfg'].get('T_steps', 64)
+    _model_cache[model_name] = (ema_model, ve, T_steps)
+    return ema_model, ve, T_steps
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +123,8 @@ class RunRequest(BaseModel):
     c:           float = 1.0
     k1:          float = 1.0
     k2:          float = 1.0
-    r:           float = 0.3
-    gamma_delta: float = 0.05
+    r:           float = 0.1
+    gamma_delta: float = 0.0
     obs_x:       float = 0.0
     obs_y:       float = 0.0
     start_x:     float = -0.8
@@ -131,6 +132,7 @@ class RunRequest(BaseModel):
     goal_x:      float = 0.8
     goal_y:      float = 0.8
     alpha0:      float = 1.0
+    use_softplus: bool = True
     seed:        Optional[int] = None
 
 
@@ -152,7 +154,7 @@ def run_optimisation(req: RunRequest):
         cbf_step_data    : [n_steps+1] dicts  — h_Xt, d_raw, d_tilde, h_wi, sigma_i, grad_x, grad_y
     """
     try:
-        ema_model, ve = _load_model(req.model_name)
+        ema_model, ve, T_steps = _load_model(req.model_name)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
@@ -169,11 +171,6 @@ def run_optimisation(req: RunRequest):
     x_start = torch.tensor([req.start_x, req.start_y], dtype=torch.float32, device=DEVICE)
     x_goal  = torch.tensor([req.goal_x,  req.goal_y],  dtype=torch.float32, device=DEVICE)
 
-    # Determine T_steps from model config
-    ckpt_path = CHECKPOINTS_DIR / req.model_name
-    ckpt = torch.load(str(ckpt_path), map_location=DEVICE)
-    T_steps = ckpt['model_cfg'].get('T_steps', 64)
-
     # Sample shared prior
     if req.seed is not None:
         torch.manual_seed(req.seed)
@@ -183,8 +180,11 @@ def run_optimisation(req: RunRequest):
     sigma_seq = sigmas[indices]
     x_init    = torch.randn(1, T_steps, 2, device=DEVICE) * sigma_seq[0]
 
+    import time
+
     try:
         # --- Plain DPM-Solver-1 ---
+        t0 = time.perf_counter()
         _, plain_history = dpm_solver_1_sample(
             ema_model, ve,
             x_start=x_start, x_goal=x_goal,
@@ -192,23 +192,25 @@ def run_optimisation(req: RunRequest):
             device=DEVICE, x_init=x_init.clone(),
             return_history=True,
         )
+        plain_time = time.perf_counter() - t0
 
         # --- Safe DPM-Solver-1 + CBF ---
+        t0 = time.perf_counter()
         _, safe_history, cbf_history = dpm_solver_1_cbf_sample(
             ema_model, ve,
             x_start=x_start, x_goal=x_goal,
             obstacles=obstacles,
             T_steps=T_steps, n_steps=req.n_steps,
             k1=req.k1, k2=k2, c=req.c,
-            alpha0=req.alpha0, gamma_delta=req.gamma_delta,
+            alpha0=req.alpha0, gamma_delta=req.gamma_delta, use_softplus=req.use_softplus,
             device=DEVICE, x_init=x_init.clone(),
             return_history=True,
         )
+        safe_time = time.perf_counter() - t0
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f'Sampler error: {exc}')
 
     def traj_to_list(t):
-        # t: [1, T, 2] -> [[x,y], ...]
         return t[0].cpu().tolist()
 
     return {
@@ -220,6 +222,8 @@ def run_optimisation(req: RunRequest):
         'plain_history': [traj_to_list(h) for h in plain_history],
         'safe_history':  [traj_to_list(h) for h in safe_history],
         'cbf_step_data': cbf_history,
+        'plain_time':    round(plain_time, 3),
+        'safe_time':     round(safe_time,  3),
     }
 
 
@@ -232,10 +236,11 @@ class MathRequest(BaseModel):
     c:           float = 1.0
     k1:          float = 1.0
     k2:          float = 1.0
-    r:           float = 0.3
-    gamma_delta: float = 0.05
+    r:           float = 0.1
+    gamma_delta: float = 0.0
     obs_x:       float = 0.0
     obs_y:       float = 0.0
+    use_softplus: bool = True
 
 
 @app.post('/api/math')
@@ -254,7 +259,7 @@ def evaluate_math(req: MathRequest):
     )
 
     try:
-        metrics = compute_cbf_metrics(Xt, obstacles, req.c, req.k1, k2, req.gamma_delta)
+        metrics = compute_cbf_metrics(Xt, obstacles, req.c, req.k1, k2, req.gamma_delta, req.use_softplus)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f'CBF math error: {exc}')
 

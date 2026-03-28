@@ -1,9 +1,60 @@
-INFO:     Started server process [56308]
+INFO:     Started server process [59756]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://127.0.0.1:8002 (Press CTRL+C to quit)
 
 ERROR conda.cli.main_run:execute(125): `conda run uvicorn visualizer_app:app --port 8002 --host 127.0.0.1` failed. (See above for error)
-INFO:     127.0.0.1:51768 - "GET /api/models HTTP/1.1" 200 OK
-INFO:     127.0.0.1:51769 - "GET /static/index.html HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64437 - "GET /static/app.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64444 - "GET /static/index.html HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:64444 - "GET /static/app.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64445 - "GET /static/style.css HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:64444 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64444 - "POST /api/run HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64452 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64452 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64453 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64462 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64462 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64462 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64462 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64462 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64462 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64462 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64462 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64462 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64462 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64462 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64462 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64462 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64462 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64462 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62524 - "POST /api/run HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62525 - "POST /api/run HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62526 - "GET /static/index.html HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:62526 - "GET /static/app.js HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:62526 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62526 - "POST /api/run HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62531 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62531 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62535 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62536 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62536 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62536 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62536 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62536 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62536 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62536 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62536 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62536 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62536 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64697 - "GET /static/index.html HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:64697 - "GET /static/app.js HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:64698 - "GET /static/style.css HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:64697 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64697 - "POST /api/run HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64699 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64699 - "POST /api/math HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64702 - "GET /static/index.html HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:64702 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64703 - "POST /api/run HTTP/1.1" 200 OK
 

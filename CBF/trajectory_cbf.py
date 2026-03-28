@@ -154,6 +154,7 @@ def trajectory_cbf(
     k2: float,
     gamma_delta: float = 0.0,
     c: float = 1.0,
+    use_softplus: bool = True,
 ) -> torch.Tensor:
     """
     Stabilised softmin of h(w_i) over waypoints.
@@ -163,12 +164,13 @@ def trajectory_cbf(
     Fully vectorised: all d_ij as [T, N] in one broadcast.
 
     Args:
-        Xt          : [T, 2]
-        obstacles   : [N, 3]
-        k1          : softmin temperature (obstacle level)
-        k2          : softmin temperature (waypoint level)
-        gamma_delta : distance margin γδ
-        c           : softplus sharpness
+        Xt           : [T, 2]
+        obstacles    : [N, 3]
+        k1           : softmin temperature (obstacle level)
+        k2           : softmin temperature (waypoint level)
+        gamma_delta  : distance margin γδ
+        c            : softplus sharpness (ignored when use_softplus=False)
+        use_softplus : if False, use raw signed distances directly
 
     Returns:
         h_Xt : scalar tensor
@@ -178,7 +180,7 @@ def trajectory_cbf(
 
     diff  = Xt.unsqueeze(1) - centres.unsqueeze(0)                           # [T, N, 2]
     d_all = (diff ** 2).sum(dim=-1) - radii.unsqueeze(0) ** 2 + gamma_delta  # [T, N]
-    d_tilde = softplus_distance(d_all, c)                                     # [T, N]
+    d_tilde = softplus_distance(d_all, c) if use_softplus else d_all          # [T, N]
 
     N, T = d_all.shape[1], d_all.shape[0]
     d_tilde_min = d_tilde.min(dim=1, keepdim=True).values                    # [T, 1]
@@ -268,13 +270,14 @@ def grad_hXt_dwi(
     k2: float,
     gamma_delta: float = 0.0,
     c: float = 1.0,
+    use_softplus: bool = True,
 ) -> torch.Tensor:
     """
     nabla_wi h(X_t) = sigma_i * nabla_wi h(w_i)   for all i simultaneously.
 
     This is identical to grad_hXt_dXt — the per-waypoint blocks assembled.
     """
-    return grad_hXt_dXt(Xt, obstacles, k1, k2, gamma_delta, c)
+    return grad_hXt_dXt(Xt, obstacles, k1, k2, gamma_delta, c, use_softplus)
 
 
 # ---------------------------------------------------------------------------
@@ -288,33 +291,28 @@ def grad_hXt_dXt(
     k2: float,
     gamma_delta: float = 0.0,
     c: float = 1.0,
+    use_softplus: bool = True,
 ) -> torch.Tensor:
     """
-    Full gradient of h(X_t) w.r.t. the trajectory X_t (eq. 36):
+    Full gradient of h(X_t) w.r.t. the trajectory X_t (eq. 36).
 
-        nabla_{X_t} h(X_t) = { -2 sigma_i sum_j alpha_ij sigmoid(-d_ij/c) (p_j - w_i) }_{i=1}^T
-
-    Shape is [T, 2], matching the layout of X_t.
+    When use_softplus=False, uses raw signed distances directly and drops the
+    sigmoid gate (gate = 1), giving:
+        nabla_{X_t} h(X_t) = { -2 sigma_i sum_j alpha_ij (p_j - w_i) }
 
     When no obstacles are present, returns a zero tensor of shape [T, 2].
 
     Args:
-        Xt          : [T, 2] full trajectory
-        obstacles   : [N, 3] obstacle tensor (px, py, r) — N >= 1
-        k1          : softmin temperature (obstacle level)
-        k2          : softmin temperature (waypoint level)
-        gamma_delta : distance margin γδ
-        c           : softplus sharpness
+        Xt           : [T, 2] full trajectory
+        obstacles    : [N, 3] obstacle tensor (px, py, r) — N >= 1
+        k1           : softmin temperature (obstacle level)
+        k2           : softmin temperature (waypoint level)
+        gamma_delta  : distance margin γδ
+        c            : softplus sharpness (ignored when use_softplus=False)
+        use_softplus : if False, skip softplus transform and sigmoid gate
 
     Returns:
         grad : [T, 2]
-
-    Example::
-        >>> Xt = torch.randn(10, 2)
-        >>> obs = torch.tensor([[1.0, 0.0, 0.5]])
-        >>> g = grad_hXt_dXt(Xt, obs, k1=1.0, k2=1.0)
-        >>> g.shape
-        torch.Size([10, 2])
     """
     if obstacles.shape[0] == 0:
         return torch.zeros_like(Xt)
@@ -326,8 +324,8 @@ def grad_hXt_dXt(
     diff  = Xt.unsqueeze(1) - centres.unsqueeze(0)                           # [T, N, 2]
     d_all = (diff ** 2).sum(dim=-1) - radii.unsqueeze(0) ** 2 + gamma_delta  # [T, N]
 
-    # Softplus transformed distances [T, N]
-    d_tilde = softplus_distance(d_all, c)
+    # Distance used for softmin weights [T, N]
+    d_tilde = softplus_distance(d_all, c) if use_softplus else d_all
 
     # Stabilised waypoint-level CBF values [T]
     N, T = d_all.shape[1], d_all.shape[0]
@@ -347,8 +345,8 @@ def grad_hXt_dXt(
     shifted_h = h_wi - h_min
     sigma_i   = F.softmax(-shifted_h / k2, dim=0)
 
-    # Sigmoid gate sigma(-d_ij/c) [T, N]
-    gate = torch.sigmoid(-d_all / c)
+    # Sigmoid gate: 1 everywhere when softplus is off
+    gate = torch.sigmoid(-d_all / c) if use_softplus else torch.ones_like(d_all)
 
     # Inner gradient: -2 sum_j alpha_ij * gate * (p_j - w_i)  [T, 2]
     disp    = centres.unsqueeze(0) - Xt.unsqueeze(1)        # [T, N, 2]  p_j - w_i
@@ -369,6 +367,7 @@ def compute_cbf_metrics(
     k1: float,
     k2: float,
     gamma_delta: float,
+    use_softplus: bool = True,
 ) -> dict:
     """
     Compute every CBF quantity needed by the step inspector.
@@ -411,8 +410,8 @@ def compute_cbf_metrics(
     diff  = Xt.unsqueeze(1) - centres.unsqueeze(0)
     d_all = (diff ** 2).sum(dim=-1) - radii.unsqueeze(0) ** 2 + gamma_delta
 
-    # Softplus distances [T, N]
-    d_tilde_all = softplus_distance(d_all, c)
+    # Optionally softplus-transformed distances [T, N]
+    d_tilde_all = softplus_distance(d_all, c) if use_softplus else d_all
 
     # Stabilised waypoint-level CBF [T]
     d_tilde_min = d_tilde_all.min(dim=1, keepdim=True).values  # [T, 1]
@@ -436,8 +435,8 @@ def compute_cbf_metrics(
     # Obstacle weights alpha_ij [T, N]
     alpha_ij = F.softmax(-shifted_d / k1, dim=1)
 
-    # Sigmoid gate [T, N]
-    gate = torch.sigmoid(-d_all / c)
+    # Sigmoid gate (1 everywhere when softplus is off) [T, N]
+    gate = torch.sigmoid(-d_all / c) if use_softplus else torch.ones_like(d_all)
 
     # Gradient [T, 2]
     disp    = centres.unsqueeze(0) - Xt.unsqueeze(1)
