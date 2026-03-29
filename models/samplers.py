@@ -146,7 +146,7 @@ def _cbf_control_term(
     step_delta =  noise_idx_next - noise_idx
 
 
-    omega     = (grad_h * (sigma_dot*eps_pred)).sum() + alpha0 * h_val
+    omega     = (grad_h * eps_pred).sum() + alpha0/sigma_dot * h_val
     omega_neg = torch.clamp(omega, max=0.0)
 
     rho = max(0.0, noise_idx - n_steps / 4.0)
@@ -156,8 +156,9 @@ def _cbf_control_term(
         denom = (grad_h * grad_h).sum() + eps
 
     ctrl_raw    = (omega_neg / denom) * grad_h          # [T, 2]  before sigma_delta
-    ctrl        = ctrl_raw * 0.2                 # [T, 2]  final correction
+    ctrl        = ctrl_raw * sigma_delta                 # [T, 2]  final correction
     return ctrl, omega.item(), ctrl_raw, sigma_delta
+
 
 
 # ---------------------------------------------------------------------------
