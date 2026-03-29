@@ -123,8 +123,10 @@ body {
   text-transform: uppercase; border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-.plain-title { color: var(--plain-color); }
-.safe-title  { color: var(--accent); }
+.plain-title  { color: var(--plain-color); }
+.safe-title   { color: var(--accent); }
+.before-title { color: #c792ea; }
+.after-title  { color: var(--accent); }
 .sample-time { margin-left: 8px; font-size: 10px; font-family: var(--mono);
                color: var(--text-dim); font-weight: 400; letter-spacing: 0; }
 
@@ -280,8 +282,14 @@ td.ctrl0-cell  { color: #64748b; }
 /* Plain DPM path */
 .plain-path  { fill: none; stroke: var(--plain-color); stroke-width: 2.5; }
 
-/* Safe DPM path */
+/* Safe DPM path (legacy — kept for compatibility) */
 .safe-path   { fill: none; stroke: var(--accent); stroke-width: 2.5; }
+
+/* DPM-CBF Before Control path */
+.before-path { fill: none; stroke: #c792ea; stroke-width: 2.5; }
+
+/* DPM-CBF After Control path */
+.after-path  { fill: none; stroke: var(--accent); stroke-width: 2.5; }
 
 /* Waypoints (safe canvas only) */
 .wp-safe     { fill: var(--safe-green);  stroke: #0f1117; stroke-width: 1; }

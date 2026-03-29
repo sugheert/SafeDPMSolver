@@ -39,19 +39,30 @@
     </div>
   </div>
 
-  <!-- ── Resize handle between plain and safe ── -->
+  <!-- ── Resize handle between plain and before ── -->
   <div id="plain-resize-handle" class="resize-handle" title="Drag to resize"></div>
 
-  <!-- ── Safe DPM Canvas (middle) ── -->
-  <div class="canvas-panel" id="panel-safe">
-    <div class="canvas-title safe-title" id="safe-title">Safe DPM &mdash; CBF Controlled<span id="safe-time" class="sample-time"></span></div>
-    <div class="canvas-container" id="safe-container">
+  <!-- ── DPM-CBF Before Control (middle-left, interactive) ── -->
+  <div class="canvas-panel" id="panel-before">
+    <div class="canvas-title before-title" id="before-title">DPM-CBF &mdash; Before Control<span id="safe-time" class="sample-time"></span></div>
+    <div class="canvas-container" id="before-container">
       <div id="loading-overlay"><div class="spinner"></div><span>Running…</span></div>
-      <svg id="safe-svg"></svg>
+      <svg id="before-svg"></svg>
     </div>
   </div>
 
-  <!-- ── Resize handle between safe and inspector ── -->
+  <!-- ── Resize handle between before and after ── -->
+  <div id="before-after-resize-handle" class="resize-handle" title="Drag to resize"></div>
+
+  <!-- ── DPM-CBF After Control (middle-right, passive) ── -->
+  <div class="canvas-panel" id="panel-after">
+    <div class="canvas-title after-title" id="after-title">DPM-CBF &mdash; After Control</div>
+    <div class="canvas-container" id="after-container">
+      <svg id="after-svg"></svg>
+    </div>
+  </div>
+
+  <!-- ── Resize handle between after and inspector ── -->
   <div id="inspector-resize-handle" class="resize-handle" title="Drag to resize inspector"></div>
 
   <!-- ── Step Inspector (right) ── -->
@@ -59,6 +70,15 @@
     <div id="hxt-summary">
       <span>h(X<sub>t</sub>)&nbsp;=&nbsp;</span>
       <span id="hxt-value" class="hxt-neutral">—</span>
+      <span class="summary-sep">|</span>
+      <span class="summary-label">min&nbsp;h(w<sub>i</sub>)&nbsp;=&nbsp;</span>
+      <span id="min-hwi-value" class="hxt-neutral">—</span>
+      <span class="summary-sep">|</span>
+      <span class="summary-label">σ<sub>Δ</sub>&nbsp;=&nbsp;</span>
+      <span id="sigma-delta-value" class="hxt-neutral">—</span>
+      <span class="summary-sep">|</span>
+      <span class="summary-label">σ̇<sub>t</sub>&nbsp;=&nbsp;</span>
+      <span id="sigma-dot-value" class="hxt-neutral">—</span>
       <span class="summary-sep">|</span>
       <span class="summary-label">ω&nbsp;=&nbsp;</span>
       <span id="omega-value" class="hxt-neutral">—</span>
@@ -136,7 +156,7 @@
   </button>
 
   <div class="param-hint">
-    Drag waypoint&nbsp;— move &nbsp;|&nbsp; Ctrl+drag&nbsp;— spline bend &nbsp;|&nbsp; ← → keys&nbsp;— step
+    Drag waypoint on Before-Control canvas&nbsp;— move &nbsp;|&nbsp; Ctrl+drag&nbsp;— spline bend &nbsp;|&nbsp; ← → keys&nbsp;— step
   </div>
 
 </div>

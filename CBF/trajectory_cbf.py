@@ -105,7 +105,7 @@ def softplus_distance(
     Returns:
         d_tilde : same shape as d, bounded above by log(2)
     """
-    return -c * F.softplus(-d / c) + math.log(2)
+    return -c * F.softplus(-d / c) #+ math.log(2)
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 SafeDPMSolver UMaze Interactive Visualiser — FastAPI Backend
 ============================================================
 Run with:
-    conda run -n py_3_10 uvicorn Diffuser.visualization.visualizer_diffuser_style_app:app --port 8002 --reload --app-dir "c:/Users/Owner/SafeDPMSolverProject"
+    conda run -n py_3_10 uvicorn Diffuser.visualization.visualizer_diffuser_style_app:app --host 0.0.0.0 --port 8002 --reload --app-dir "c:/Users/Owner/SafeDPMSolverProject"
 
 Endpoints:
     GET  /                  -> redirect to /static/index.html
@@ -41,7 +41,7 @@ if str(PROJECT_DIR) not in sys.path:
 
 from models.score_net import TemporalUnet
 from models.ve_diffusion import VEDiffusion
-from models.samplers import dpm_solver_1_sample, dpm_solver_1_cbf_sample
+from models.samplers import dpm_solver_1_sample, dpm_solver_1_cbf_sample, recompute_cbf_step
 from CBF.trajectory_cbf import compute_cbf_metrics
 
 # ---------------------------------------------------------------------------
@@ -287,7 +287,7 @@ def run_optimisation(req: RunRequest):
 
         # --- Safe DPM-Solver-1 + CBF ---
         t0 = time.perf_counter()
-        _, safe_history, cbf_history = dpm_solver_1_cbf_sample(
+        _, safe_history, _before_history, cbf_history = dpm_solver_1_cbf_sample(
             ema_model, ve,
             x_start=x_start, x_goal=x_goal,
             obstacles=obstacles,
@@ -305,16 +305,17 @@ def run_optimisation(req: RunRequest):
         return t[0].cpu().tolist()
 
     return {
-        'n_steps':       req.n_steps,
-        'T_steps':       T_steps,
-        'start':         [req.start_x, req.start_y],
-        'goal':          [req.goal_x,  req.goal_y],
-        'prior':         traj_to_list(x_init),
-        'plain_history': [traj_to_list(h) for h in plain_history],
-        'safe_history':  [traj_to_list(h) for h in safe_history],
-        'cbf_step_data': cbf_history,
-        'plain_time':    round(plain_time, 3),
-        'safe_time':     round(safe_time,  3),
+        'n_steps':        req.n_steps,
+        'T_steps':        T_steps,
+        'start':          [req.start_x, req.start_y],
+        'goal':           [req.goal_x,  req.goal_y],
+        'prior':          traj_to_list(x_init),
+        'plain_history':  [traj_to_list(h) for h in plain_history],
+        'before_history': [traj_to_list(h) for h in _before_history],
+        'safe_history':   [traj_to_list(h) for h in safe_history],
+        'cbf_step_data':  cbf_history,
+        'plain_time':     round(plain_time, 3),
+        'safe_time':      round(safe_time,  3),
     }
 
 
@@ -355,3 +356,65 @@ def evaluate_math(req: MathRequest):
         raise HTTPException(status_code=500, detail=f'CBF math error: {exc}')
 
     return metrics
+
+
+# ---------------------------------------------------------------------------
+# /api/recompute_ctrl  — recompute CBF metrics + control + after trajectory
+# ---------------------------------------------------------------------------
+
+class RecomputeRequest(BaseModel):
+    before_traj:  List[List[float]]
+    eps_pred_x:   List[float]
+    eps_pred_y:   List[float]
+    sigma_delta:  float
+    sigma_dot:    float
+    noise_idx:    int
+    n_steps:      int
+    c:            float = 1.0
+    k1:           float = 1.0
+    k2:           float = 1.0
+    r:            float = 0.1
+    gamma_delta:  float = 0.0
+    obs_x:        float = 0.0
+    obs_y:        float = 0.0
+    alpha0:       float = 1.0
+    use_softplus: bool  = True
+
+
+@app.post('/api/recompute_ctrl')
+def recompute_ctrl_endpoint(req: RecomputeRequest):
+    """
+    Recompute CBF metrics and after-control trajectory for one step,
+    given a (possibly modified) before-control trajectory and cached eps_pred.
+    Does not re-run the score network.
+
+    Response: cbf_history entry dict PLUS 'after_traj' [[x, y], ...]
+    """
+    k2 = max(req.k2, 1e-3)
+
+    obstacles = torch.tensor(
+        [[req.obs_x, req.obs_y, req.r]], dtype=torch.float32, device=DEVICE
+    )
+
+    try:
+        result = recompute_cbf_step(
+            before_traj  = req.before_traj,
+            eps_pred_x   = req.eps_pred_x,
+            eps_pred_y   = req.eps_pred_y,
+            sigma_delta  = req.sigma_delta,
+            sigma_dot    = req.sigma_dot,
+            noise_idx    = req.noise_idx,
+            n_steps      = req.n_steps,
+            obstacles    = obstacles,
+            k1           = req.k1,
+            k2           = k2,
+            c            = req.c,
+            alpha0       = req.alpha0,
+            gamma_delta  = req.gamma_delta,
+            use_softplus = req.use_softplus,
+            device       = DEVICE,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f'Recompute error: {exc}')
+
+    return result

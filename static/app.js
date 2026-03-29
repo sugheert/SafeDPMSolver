@@ -1,16 +1,18 @@
 /* ══════════════════════════════════════════════════════════════════════
-   SafeDPMSolver — Side-by-Side Visualiser
-   Plain DPM (left)  |  Safe DPM / CBF (right, interactive)  |  Inspector
+   SafeDPMSolver — Three-Panel Visualiser
+   Plain DPM (left)  |  DPM-CBF Before Control (middle, interactive)
+   DPM-CBF After Control (right, passive)  |  Inspector
    ══════════════════════════════════════════════════════════════════════ */
 
 const API = '';
 
 /* ── Global state ─────────────────────────────────────────────────── */
-let cachedData      = null;
-let currentStep     = 0;
-let currentSafeTraj = null;   // deep copy of safe traj for current step (editable)
-let draggedIdx      = -1;
-let isCtrlHeld      = false;
+let cachedData       = null;
+let currentStep      = 0;
+let currentBeforeTraj = null;  // editable before-control traj; reset on step change
+let currentSafeTraj  = null;   // after-control traj; updated by recompute
+let draggedIdx       = -1;
+let isCtrlHeld       = false;
 
 /* ── Per-SVG zoom transforms (persist across buildCanvases rebuilds) ── */
 const zoomStates = {};   // keyed by SVG id → d3.ZoomTransform
@@ -22,9 +24,10 @@ let params = { c: 1.0, k1: 1.0, k2: 1.0, r: 0.3, gamma_delta: 0.05, alpha0: 1.0 
 const WORLD_MIN = -1.5;
 const WORLD_MAX =  1.5;
 
-/* ── Two SVG selections ───────────────────────────────────────────── */
-const svgP = d3.select('#plain-svg');   // plain (left)
-const svgS = d3.select('#safe-svg');    // safe  (right, interactive)
+/* ── Three SVG selections ─────────────────────────────────────────── */
+const svgP = d3.select('#plain-svg');    // plain (left)
+const svgB = d3.select('#before-svg');   // before-control (middle, interactive)
+const svgA = d3.select('#after-svg');    // after-control  (right, passive)
 
 /* ── Scale functions  — shared size, updated in buildCanvases() ───── */
 let SZ = 400;
@@ -32,16 +35,19 @@ const xS = d3.scaleLinear().domain([WORLD_MIN, WORLD_MAX]).range([44, SZ - 16]);
 const yS = d3.scaleLinear().domain([WORLD_MIN, WORLD_MAX]).range([SZ - 32, 16]);
 
 /* ── DOM refs ─────────────────────────────────────────────────────── */
-const overlay   = document.getElementById('loading-overlay');
-const runBtn    = document.getElementById('run-btn');
-const scrubber  = document.getElementById('step-scrubber');
-const stepLabel = document.getElementById('step-label');
-const stepMax   = document.getElementById('step-max');
-const hxtValue   = document.getElementById('hxt-value');
-const omegaValue = document.getElementById('omega-value');
-const tbody      = document.getElementById('inspector-tbody');
-const btnPrev   = document.getElementById('step-prev');
-const btnNext   = document.getElementById('step-next');
+const overlay    = document.getElementById('loading-overlay');
+const runBtn     = document.getElementById('run-btn');
+const scrubber   = document.getElementById('step-scrubber');
+const stepLabel  = document.getElementById('step-label');
+const stepMax    = document.getElementById('step-max');
+const hxtValue        = document.getElementById('hxt-value');
+const minHwiValue     = document.getElementById('min-hwi-value');
+const sigmaDeltaValue = document.getElementById('sigma-delta-value');
+const sigmaDotValue   = document.getElementById('sigma-dot-value');
+const omegaValue      = document.getElementById('omega-value');
+const tbody       = document.getElementById('inspector-tbody');
+const btnPrev    = document.getElementById('step-prev');
+const btnNext    = document.getElementById('step-next');
 
 /* ════════════════════════════════════════════════════════════════════
    INIT
@@ -149,28 +155,32 @@ async function fetchModels() {
    ════════════════════════════════════════════════════════════════════ */
 
 function buildCanvases() {
-  // Compute square canvas size from whichever container is smaller
-  const cP = document.getElementById('plain-container');
-  const cS = document.getElementById('safe-container');
-  const w  = Math.min(cP.clientWidth,  cS.clientWidth)  - 4;
-  const h  = Math.min(cP.clientHeight, cS.clientHeight) - 4;
-  SZ       = Math.max(Math.min(w, h), 200);
+  // Compute square canvas size from the smallest container
+  const cP  = document.getElementById('plain-container');
+  const cBe = document.getElementById('before-container');
+  const cAf = document.getElementById('after-container');
+  const w   = Math.min(cP.clientWidth,  cBe.clientWidth,  cAf.clientWidth)  - 4;
+  const h   = Math.min(cP.clientHeight, cBe.clientHeight, cAf.clientHeight) - 4;
+  SZ        = Math.max(Math.min(w, h), 200);
 
   xS.range([44, SZ - 16]);
   yS.range([SZ - 32, 16]);
 
   initSvg(svgP);
-  initSvg(svgS);
+  initSvg(svgB);
+  initSvg(svgA);
 
   applyZoom(svgP);
-  applyZoom(svgS);
+  applyZoom(svgB);
+  applyZoom(svgA);
 
-  drawObstacleOnBoth();
+  drawObstacleOnAll();
   drawMarkersOn(svgP);
-  drawMarkersOn(svgS);
+  drawMarkersOn(svgB);
+  drawMarkersOn(svgA);
 
-  // Attach canvas-wide drag for waypoints (safe canvas only)
-  attachSafeDrag();
+  // Attach canvas-wide drag for waypoints (before-canvas only)
+  attachBeforeDrag();
 }
 
 /* ── Initialise one SVG: size, defs, grid, axes, empty layers ─────── */
@@ -281,16 +291,17 @@ function drawObstacleOn(svgSel, draggable) {
         event.sourceEvent.stopPropagation();
         obstaclePos.x = xS.invert(event.x);
         obstaclePos.y = yS.invert(event.y);
-        drawObstacleOnBoth();
-        if (currentSafeTraj) debouncedMathUpdate();
+        drawObstacleOnAll();
+        if (currentBeforeTraj) debouncedRecomputeUpdate();
       });
     g.selectAll('.obs-fill, .obs-ring').call(drag);
   }
 }
 
-function drawObstacleOnBoth() {
-  drawObstacleOn(svgP, false);  // plain: non-draggable, just visual
-  drawObstacleOn(svgS, true);   // safe: draggable
+function drawObstacleOnAll() {
+  drawObstacleOn(svgP, false);   // plain: non-draggable, just visual
+  drawObstacleOn(svgB, true);    // before: draggable
+  drawObstacleOn(svgA, false);   // after: non-draggable
 }
 
 /* ── Start / Goal markers ─────────────────────────────────────────── */
@@ -309,42 +320,40 @@ function drawMarkersOn(svgSel) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
-   CANVAS-WIDE DRAG ON SAFE SVG
+   CANVAS-WIDE DRAG ON BEFORE SVG
    ════════════════════════════════════════════════════════════════════ */
 
-function attachSafeDrag() {
+function attachBeforeDrag() {
   const drag = d3.drag()
-    // Use the SVG element itself as the coordinate container so event.x/y
-    // are in SVG pixel space (matching xS/yS), not the surrounding div.
-    .container(svgS.node())
+    .container(svgB.node())
     .filter(function(event) {
-      if (!currentSafeTraj) return false;
+      if (!currentBeforeTraj) return false;
       // Ignore if click originated on the draggable obstacle
       let el = event.sourceEvent && event.sourceEvent.target;
-      while (el) { if (el.id === 'safe-svg-obstacle') return false; el = el.parentElement; }
+      while (el) { if (el.id === 'before-svg-obstacle') return false; el = el.parentElement; }
       return true;
     })
     .on('start', function(event) {
-      const [wx, wy] = svgToWorld(event.x, event.y, svgS);
-      draggedIdx = findNearest(wx, wy, currentSafeTraj);
+      const [wx, wy] = svgToWorld(event.x, event.y, svgB);
+      draggedIdx = findNearest(wx, wy, currentBeforeTraj);
     })
     .on('drag', function(event) {
       if (draggedIdx < 0) return;
-      const [wx, wy] = svgToWorld(event.x, event.y, svgS);
+      const [wx, wy] = svgToWorld(event.x, event.y, svgB);
 
       if (isCtrlHeld) {
-        currentSafeTraj = gaussianDeform(currentSafeTraj, draggedIdx, wx, wy);
+        currentBeforeTraj = gaussianDeform(currentBeforeTraj, draggedIdx, wx, wy);
       } else {
-        currentSafeTraj = currentSafeTraj.map((pt, i) => i === draggedIdx ? [wx, wy] : pt);
+        currentBeforeTraj = currentBeforeTraj.map((pt, i) => i === draggedIdx ? [wx, wy] : pt);
       }
 
-      renderSafePath(currentSafeTraj);
-      renderWaypoints(currentSafeTraj, null);
-      debouncedMathUpdate();
+      renderBeforePath(currentBeforeTraj);
+      renderWaypoints(svgB, currentBeforeTraj, null);
+      debouncedRecomputeUpdate();
     })
     .on('end', () => { draggedIdx = -1; });
 
-  svgS.call(drag);
+  svgB.call(drag);
 }
 
 function findNearest(wx, wy, traj) {
@@ -373,13 +382,15 @@ function gaussianDeform(traj, anchor, newX, newY) {
 function renderCurrentStep() {
   if (!cachedData) return;
 
-  const prior     = cachedData.prior;
-  const plainTraj = cachedData.plain_history[currentStep];
-  const safeTraj  = cachedData.safe_history[currentStep];
-  const cbf       = cachedData.cbf_step_data[currentStep];
+  const prior      = cachedData.prior;
+  const plainTraj  = cachedData.plain_history[currentStep];
+  const beforeTraj = cachedData.before_history[currentStep];
+  const afterTraj  = cachedData.safe_history[currentStep];
+  const cbf        = cachedData.cbf_step_data[currentStep];
 
-  // Deep copy so edits don't corrupt the cache
-  currentSafeTraj = safeTraj.map(pt => [pt[0], pt[1]]);
+  // Deep copy so edits don't corrupt the cache; also resets any dragged state
+  currentBeforeTraj = beforeTraj.map(pt => [pt[0], pt[1]]);
+  currentSafeTraj   = afterTraj.map(pt => [pt[0], pt[1]]);
 
   // ── Plain canvas ──────────────────────────────────────────────────
   renderPathOn(svgP, 'prior',     prior,     'prior-path');
@@ -387,13 +398,20 @@ function renderCurrentStep() {
   drawObstacleOn(svgP, false);
   drawMarkersOn(svgP);
 
-  // ── Safe canvas ───────────────────────────────────────────────────
-  renderPathOn(svgS, 'prior',     prior,          'prior-path');
-  renderSafePath(currentSafeTraj);
-  renderGradArrows(currentSafeTraj, cbf);
-  renderWaypoints(currentSafeTraj, cbf);
-  drawObstacleOn(svgS, true);
-  drawMarkersOn(svgS);
+  // ── Before-control canvas (interactive) ───────────────────────────
+  renderPathOn(svgB, 'prior',     prior,             'prior-path');
+  renderBeforePath(currentBeforeTraj);
+  renderGradArrows(svgB, currentBeforeTraj, cbf);
+  renderWaypoints(svgB, currentBeforeTraj, cbf);
+  drawObstacleOn(svgB, true);
+  drawMarkersOn(svgB);
+
+  // ── After-control canvas (passive) ────────────────────────────────
+  renderPathOn(svgA, 'prior',     prior,           'prior-path');
+  renderAfterPath(currentSafeTraj);
+  renderWaypoints(svgA, currentSafeTraj, cbf);
+  drawObstacleOn(svgA, false);
+  drawMarkersOn(svgA);
 
   updateInspector(cbf);
 }
@@ -408,13 +426,17 @@ function renderPathOn(svgSel, layerName, traj, cssClass) {
   g.append('path').attr('class', cssClass).attr('d', lineGen(traj));
 }
 
-function renderSafePath(traj) {
-  renderPathOn(svgS, 'main-path', traj, 'safe-path');
+function renderBeforePath(traj) {
+  renderPathOn(svgB, 'main-path', traj, 'before-path');
 }
 
-function renderGradArrows(traj, cbf) {
-  const id = svgS.attr('id');
-  const g  = svgS.select(`#${id}-grads`);
+function renderAfterPath(traj) {
+  renderPathOn(svgA, 'main-path', traj, 'after-path');
+}
+
+function renderGradArrows(svgSel, traj, cbf) {
+  const id = svgSel.attr('id');
+  const g  = svgSel.select(`#${id}-grads`);
   g.selectAll('*').remove();
   if (!cbf || !cbf.grad_x) return;
 
@@ -422,7 +444,7 @@ function renderGradArrows(traj, cbf) {
   const mags   = gx.map((v, i) => Math.sqrt(v * v + gy[i] * gy[i]));
   const maxMag = Math.max(...mags, 1e-10);
   const MAX_PX = 28;
-  const svgId  = svgS.attr('id');
+  const svgId  = svgSel.attr('id');
 
   traj.forEach(([wx, wy], i) => {
     const mag = mags[i];
@@ -441,9 +463,9 @@ function renderGradArrows(traj, cbf) {
 
 const tooltip = document.getElementById('wp-tooltip');
 
-function renderWaypoints(traj, cbf) {
-  const id = svgS.attr('id');
-  const g  = svgS.select(`#${id}-waypoints`);
+function renderWaypoints(svgSel, traj, cbf) {
+  const id = svgSel.attr('id');
+  const g  = svgSel.select(`#${id}-waypoints`);
   g.selectAll('*').remove();
   if (!traj) return;
 
@@ -499,8 +521,11 @@ function positionTooltip(event) {
 function updateInspector(cbf) {
   if (!cbf) {
     tbody.innerHTML = '';
-    hxtValue.textContent  = '—'; hxtValue.className  = 'hxt-neutral';
-    omegaValue.textContent = '—'; omegaValue.className = 'hxt-neutral';
+    hxtValue.textContent        = '—'; hxtValue.className        = 'hxt-neutral';
+    minHwiValue.textContent     = '—'; minHwiValue.className     = 'hxt-neutral';
+    sigmaDeltaValue.textContent = '—'; sigmaDeltaValue.className = 'hxt-neutral';
+    sigmaDotValue.textContent   = '—'; sigmaDotValue.className   = 'hxt-neutral';
+    omegaValue.textContent      = '—'; omegaValue.className      = 'hxt-neutral';
     return;
   }
 
@@ -509,7 +534,20 @@ function updateInspector(cbf) {
   hxtValue.textContent = hxt.toFixed(5);
   hxtValue.className   = hxt < 0 ? 'hxt-danger' : 'hxt-safe';
 
-  // omega (scalar, may be null for /api/math or step-0)
+  // min h(w_i)
+  const minHwi = Math.min(...cbf.h_wi);
+  minHwiValue.textContent = minHwi.toFixed(5);
+  minHwiValue.className   = minHwi < 0 ? 'hxt-danger' : 'hxt-safe';
+
+  // sigma_delta and sigma_dot
+  const sd = cbf.sigma_delta ?? null;
+  const sdot = cbf.sigma_dot ?? null;
+  sigmaDeltaValue.textContent = sd   !== null ? sd.toFixed(5)   : '—';
+  sigmaDotValue.textContent   = sdot !== null ? sdot.toFixed(5) : '—';
+  sigmaDeltaValue.className   = 'hxt-neutral';
+  sigmaDotValue.className     = 'hxt-neutral';
+
+  // omega (scalar, may be null for step-0)
   const omega = cbf.omega ?? null;
   if (omega === null) {
     omegaValue.textContent = '—';
@@ -595,8 +633,8 @@ function bindParamControls() {
     el.addEventListener('input', () => {
       params[key] = parseFloat(el.value);
       if (vel) vel.textContent = params[key].toFixed(dec);
-      drawObstacleOnBoth();
-      if (currentSafeTraj) debouncedMathUpdate();
+      drawObstacleOnAll();
+      if (currentBeforeTraj) debouncedRecomputeUpdate();
     });
   };
   bind('c-slider',  'c',           'c-val',  2);
@@ -605,10 +643,11 @@ function bindParamControls() {
   bind('gd-slider', 'gamma_delta', 'gd-val', 2);
   document.getElementById('k2-input').addEventListener('change', () => {
     params.k2 = Math.max(0.01, parseFloat(document.getElementById('k2-input').value) || 1.0);
-    if (currentSafeTraj) debouncedMathUpdate();
+    if (currentBeforeTraj) debouncedRecomputeUpdate();
   });
   document.getElementById('alpha0-input').addEventListener('change', () => {
     params.alpha0 = Math.max(0.0, parseFloat(document.getElementById('alpha0-input').value) || 1.0);
+    if (currentBeforeTraj) debouncedRecomputeUpdate();
   });
 }
 
@@ -659,7 +698,8 @@ async function runOptimisation() {
     setStep(cachedData.n_steps);
 
     drawMarkersOn(svgP);
-    drawMarkersOn(svgS);
+    drawMarkersOn(svgB);
+    drawMarkersOn(svgA);
   } catch (e) {
     alert(`Run failed: ${e.message}`);
     console.error(e);
@@ -669,55 +709,66 @@ async function runOptimisation() {
 }
 
 /* ════════════════════════════════════════════════════════════════════
-   MATH UPDATE  (live re-evaluation on drag / param change)
+   RECOMPUTE UPDATE  (live re-evaluation on before-canvas drag / param change)
+   Calls /api/recompute_ctrl with the current before-traj + cached eps_pred
+   → updates the inspector table AND the after-canvas path
    ════════════════════════════════════════════════════════════════════ */
 
-async function mathUpdate() {
-  if (!currentSafeTraj) return;
+async function recomputeUpdate() {
+  if (!currentBeforeTraj || !cachedData) return;
+
+  const cbfCached = cachedData.cbf_step_data[currentStep];
+  if (!cbfCached) return;
+
+  // Step 0: no ODE step taken yet, no control — nothing to recompute
+  if (currentStep === 0) return;
+
   try {
-    const res = await fetch(`${API}/api/math`, {
+    const res = await fetch(`${API}/api/recompute_ctrl`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        traj: currentSafeTraj,
-        c: params.c, k1: params.k1, k2: params.k2,
-        r: params.r, gamma_delta: params.gamma_delta,
+        before_traj:  currentBeforeTraj,
+        eps_pred_x:   cbfCached.eps_pred_x,
+        eps_pred_y:   cbfCached.eps_pred_y,
+        sigma_delta:  cbfCached.sigma_delta,
+        sigma_dot:    cbfCached.sigma_dot,
+        noise_idx:    cbfCached.noise_idx,
+        n_steps:      cachedData.n_steps,
+        c:            params.c,
+        k1:           params.k1,
+        k2:           params.k2,
+        r:            params.r,
+        gamma_delta:  params.gamma_delta,
+        alpha0:       params.alpha0,
         use_softplus: params.use_softplus,
-        obs_x: obstaclePos.x, obs_y: obstaclePos.y,
+        obs_x:        obstaclePos.x,
+        obs_y:        obstaclePos.y,
       }),
     });
     if (!res.ok) return;
-    const fresh = await res.json();
+    const result = await res.json();
 
-    // /api/math has no score-network access so it cannot recompute omega or
-    // ctrl (those need eps_pred).  Preserve the values from the original run.
-    const prev = cachedData?.cbf_step_data[currentStep];
-    const cbf = {
-      ...fresh,
-      omega:       prev?.omega       ?? null,
-      ctrl_x:      prev?.ctrl_x      ?? null,
-      ctrl_y:      prev?.ctrl_y      ?? null,
-      ctrl_raw_x:  prev?.ctrl_raw_x  ?? null,
-      ctrl_raw_y:  prev?.ctrl_raw_y  ?? null,
-      sigma_delta: prev?.sigma_delta ?? null,
-    };
+    // Update after-control trajectory
+    currentSafeTraj = result.after_traj;
+    renderAfterPath(currentSafeTraj);
+    renderWaypoints(svgA, currentSafeTraj, result);
+    drawObstacleOn(svgA, false);
+    drawMarkersOn(svgA);
 
-    if (cachedData) {
-      cachedData.cbf_step_data[currentStep] = cbf;
-      cachedData.safe_history[currentStep]  = currentSafeTraj.map(p => [p[0], p[1]]);
-    }
+    // Refresh before-canvas overlays with new metrics
+    renderGradArrows(svgB, currentBeforeTraj, result);
+    renderWaypoints(svgB, currentBeforeTraj, result);
+    drawObstacleOnAll();
 
-    renderGradArrows(currentSafeTraj, cbf);
-    renderWaypoints(currentSafeTraj, cbf);
-    drawObstacleOnBoth();
-    updateInspector(cbf);
-  } catch (e) { console.warn('Math update error:', e); }
+    updateInspector(result);
+  } catch (e) { console.warn('Recompute error:', e); }
 }
 
-let _mathTimer = null;
-function debouncedMathUpdate() {
-  clearTimeout(_mathTimer);
-  _mathTimer = setTimeout(mathUpdate, 80);
+let _recomputeTimer = null;
+function debouncedRecomputeUpdate() {
+  clearTimeout(_recomputeTimer);
+  _recomputeTimer = setTimeout(recomputeUpdate, 80);
 }
 
 /* ── Loading ──────────────────────────────────────────────────────── */
@@ -769,8 +820,7 @@ function bindResizeHandle(handleId, targetId, sign, minPx, maxFrac) {
 }
 
 function bindInspectorResize() {
-  // Plain panel: drag right → expand (+1), bounded 120px – 55% of window
-  bindResizeHandle('plain-resize-handle',    'panel-plain', +1, 120, 0.55);
-  // Inspector:   drag left  → expand (-1), bounded 220px – 60% of window
-  bindResizeHandle('inspector-resize-handle','inspector',   -1, 220, 0.60);
+  bindResizeHandle('plain-resize-handle',        'panel-plain',  +1, 120, 0.35);
+  bindResizeHandle('before-after-resize-handle', 'panel-before', +1, 120, 0.35);
+  bindResizeHandle('inspector-resize-handle',    'inspector',    -1, 220, 0.60);
 }
