@@ -105,7 +105,7 @@ def softplus_distance(
     Returns:
         d_tilde : same shape as d, bounded above by log(2)
     """
-    return -c * F.softplus(-d / c) #+ math.log(2)
+    return -c * F.softplus(-d / c) + math.log(2)
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +193,7 @@ def trajectory_cbf(
 
     h_min     = h_wi.min()
     shifted_h = h_wi - h_min                                                 # [T], >= 0
-    return h_min - k2 * torch.logsumexp(-shifted_h / k2, dim=0) + k2 * math.log(T)
+    return h_min - k2 * torch.logsumexp(-shifted_h / k2, dim=0) #+ k2 * math.log(T)
 
 
 # ---------------------------------------------------------------------------
