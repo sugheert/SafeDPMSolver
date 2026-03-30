@@ -2,7 +2,7 @@
 SafeDPMSolver Interactive Visualiser — FastAPI Backend
 ======================================================
 Run with:
-    conda run -n py_3_10 uvicorn visualizer_app:app --host 0.0.0.0 --port 8001 --reload
+    conda run -n py_3_10 uvicorn visualizer_app:app --host 0.0.0.0 --port 8001 --reload --reload-dir "c:/Users/Owner/SafeDPMSolverProject"
 
 Endpoints:
     GET  /                  -> redirect to /static/index.html

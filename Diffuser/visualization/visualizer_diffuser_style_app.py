@@ -2,7 +2,7 @@
 SafeDPMSolver UMaze Interactive Visualiser — FastAPI Backend
 ============================================================
 Run with:
-    conda run -n py_3_10 uvicorn Diffuser.visualization.visualizer_diffuser_style_app:app --host 0.0.0.0 --port 8002 --reload --app-dir "c:/Users/Owner/SafeDPMSolverProject"
+    conda run -n py_3_10 uvicorn Diffuser.visualization.visualizer_diffuser_style_app:app --host 0.0.0.0 --port 8002 --reload --reload-dir "c:/Users/Owner/SafeDPMSolverProject" --app-dir "c:/Users/Owner/SafeDPMSolverProject"
 
 Endpoints:
     GET  /                  -> redirect to /static/index.html
