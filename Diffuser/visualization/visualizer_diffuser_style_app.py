@@ -369,6 +369,7 @@ class RecomputeRequest(BaseModel):
     sigma_delta:  float
     sigma_dot:    float
     noise_idx:    int
+    step_delta:   int   = 0
     n_steps:      int
     c:            float = 1.0
     k1:           float = 1.0
@@ -404,6 +405,7 @@ def recompute_ctrl_endpoint(req: RecomputeRequest):
             sigma_delta  = req.sigma_delta,
             sigma_dot    = req.sigma_dot,
             noise_idx    = req.noise_idx,
+            step_delta   = req.step_delta,
             n_steps      = req.n_steps,
             obstacles    = obstacles,
             k1           = req.k1,

@@ -172,6 +172,7 @@ def recompute_cbf_step(
     sigma_delta:  float,
     sigma_dot:    float,
     noise_idx:    int,
+    step_delta:   int,
     n_steps:      int,
     obstacles:    torch.Tensor,  # [N, 3]
     k1:           float,
@@ -212,6 +213,7 @@ def recompute_cbf_step(
         m['eps_pred_y']  = list(eps_pred_y)
         m['sigma_dot']   = sigma_dot
         m['noise_idx']   = noise_idx
+        m['step_delta']  = step_delta
         m['after_traj']  = before_traj
         return m
 
@@ -220,7 +222,7 @@ def recompute_cbf_step(
         sig_cur=sigma_delta, sig_next=0.0,    # dummy: only difference is used
         sigma_dot=sigma_dot,
         noise_idx=noise_idx,
-        noise_idx_next=noise_idx,             # unused inside _cbf_control_term
+        noise_idx_next=noise_idx + step_delta,
         n_steps=n_steps,
         obstacles=obstacles,
         k1=k1, k2=k2, c=c, alpha0=alpha0,
@@ -239,6 +241,7 @@ def recompute_cbf_step(
     m['eps_pred_y']  = list(eps_pred_y)
     m['sigma_dot']   = sigma_dot
     m['noise_idx']   = noise_idx
+    m['step_delta']  = step_delta
     m['after_traj']  = after_Xt.tolist()
     return m
 
@@ -328,6 +331,7 @@ def dpm_solver_1_cbf_sample(
         m0['eps_pred_y']  = [0.0] * T_steps
         m0['sigma_dot']   = 0.0
         m0['noise_idx']   = 0
+        m0['step_delta']  = 0
         cbf_history.append(m0)
 
     for step_i in range(n_steps):
@@ -345,12 +349,13 @@ def dpm_solver_1_cbf_sample(
 
         # CBF correction per sample — capture b=0 values for inspector
         ctrl_b0, omega_b0, ctrl_raw_b0, sigma_delta_b0 = None, None, None, None
-        eps_pred_b0, sigma_dot_val, noise_idx_val = None, None, None
+        eps_pred_b0, sigma_dot_val, noise_idx_val, step_delta_val = None, None, None, None
 
         if has_obstacles:
             sigma_dot_val  = ve_diffusion.sigma_dot(sig_cur).item()
             noise_idx_val  = indices[step_i].item()
             noise_idx_next = indices[step_i + 1].item()
+            step_delta_val = noise_idx_next - noise_idx_val
 
             for b in range(B):
                 ctrl, omega_val, ctrl_raw, sigma_delta = _cbf_control_term(
@@ -391,6 +396,7 @@ def dpm_solver_1_cbf_sample(
                 m['eps_pred_y']  = eps_pred_b0[:, 1].tolist()
                 m['sigma_dot']   = sigma_dot_val
                 m['noise_idx']   = noise_idx_val
+                m['step_delta']  = step_delta_val
             else:
                 m = _empty_cbf_metrics(T_steps)
             cbf_history.append(m)
@@ -423,4 +429,5 @@ def _empty_cbf_metrics(T: int) -> dict:
         'eps_pred_y':  [0.0] * T,
         'sigma_dot':   0.0,
         'noise_idx':   0,
+        'step_delta':  0,
     }

@@ -44,6 +44,7 @@ const hxtValue        = document.getElementById('hxt-value');
 const minHwiValue     = document.getElementById('min-hwi-value');
 const sigmaDeltaValue = document.getElementById('sigma-delta-value');
 const sigmaDotValue   = document.getElementById('sigma-dot-value');
+const stepDeltaValue  = document.getElementById('step-delta-value');
 const omegaValue      = document.getElementById('omega-value');
 const tbody       = document.getElementById('inspector-tbody');
 const btnPrev    = document.getElementById('step-prev');
@@ -525,6 +526,7 @@ function updateInspector(cbf) {
     minHwiValue.textContent     = '—'; minHwiValue.className     = 'hxt-neutral';
     sigmaDeltaValue.textContent = '—'; sigmaDeltaValue.className = 'hxt-neutral';
     sigmaDotValue.textContent   = '—'; sigmaDotValue.className   = 'hxt-neutral';
+    stepDeltaValue.textContent  = '—'; stepDeltaValue.className  = 'hxt-neutral';
     omegaValue.textContent      = '—'; omegaValue.className      = 'hxt-neutral';
     return;
   }
@@ -539,13 +541,16 @@ function updateInspector(cbf) {
   minHwiValue.textContent = minHwi.toFixed(5);
   minHwiValue.className   = minHwi < 0 ? 'hxt-danger' : 'hxt-safe';
 
-  // sigma_delta and sigma_dot
-  const sd = cbf.sigma_delta ?? null;
-  const sdot = cbf.sigma_dot ?? null;
-  sigmaDeltaValue.textContent = sd   !== null ? sd.toFixed(5)   : '—';
-  sigmaDotValue.textContent   = sdot !== null ? sdot.toFixed(5) : '—';
+  // sigma_delta, sigma_dot, step_delta
+  const sd   = cbf.sigma_delta ?? null;
+  const sdot = cbf.sigma_dot   ?? null;
+  const sdt  = cbf.step_delta  ?? null;
+  sigmaDeltaValue.textContent = sd   !== null ? sd.toFixed(5)     : '—';
+  sigmaDotValue.textContent   = sdot !== null ? sdot.toFixed(5)   : '—';
+  stepDeltaValue.textContent  = sdt  !== null ? sdt.toString()    : '—';
   sigmaDeltaValue.className   = 'hxt-neutral';
   sigmaDotValue.className     = 'hxt-neutral';
+  stepDeltaValue.className    = 'hxt-neutral';
 
   // omega (scalar, may be null for step-0)
   const omega = cbf.omega ?? null;
@@ -734,6 +739,7 @@ async function recomputeUpdate() {
         sigma_delta:  cbfCached.sigma_delta,
         sigma_dot:    cbfCached.sigma_dot,
         noise_idx:    cbfCached.noise_idx,
+        step_delta:   cbfCached.step_delta ?? 0,
         n_steps:      cachedData.n_steps,
         c:            params.c,
         k1:           params.k1,
