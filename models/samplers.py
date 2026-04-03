@@ -150,7 +150,7 @@ def _cbf_control_term(
     omega     = (sigma_delta * grad_h * eps_pred).sum() + step_delta*alpha0 * h_val
     omega_neg = torch.clamp(omega, max=0.0)
 
-    rho = max(0.0, noise_idx - n_steps / 4.0)
+    rho = max(0.0, noise_idx - n_steps / 2.0)
     if rho > 0.0:
         denom = (grad_h * grad_h).sum() + (1.0 / rho) * h_val ** 2 + eps
     else:

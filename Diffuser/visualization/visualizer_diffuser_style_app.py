@@ -32,9 +32,15 @@ from pydantic import BaseModel
 # ---------------------------------------------------------------------------
 # Path setup — add project root so sibling packages are importable
 # ---------------------------------------------------------------------------
-PROJECT_DIR   = Path(__file__).parent.parent.parent.resolve()   # SafeDPMSolverProject/
-STATIC_DIR    = Path(__file__).parent / 'static'
-MAZE_DATA_DIR = PROJECT_DIR / 'Diffuser' / 'data' / 'umaze_v2'
+PROJECT_DIR    = Path(__file__).parent.parent.parent.resolve()   # SafeDPMSolverProject/
+STATIC_DIR     = Path(__file__).parent / 'static'
+MAZE_DATA_BASE = PROJECT_DIR / 'Diffuser' / 'data'
+
+# Registered maze environments — add more here as new datasets are prepared
+MAZE_ENVS: dict[str, Path] = {
+    'PointMaze_UMaze-v3': MAZE_DATA_BASE / 'umaze_v2',
+    'PointMaze_Large-v3': MAZE_DATA_BASE / 'large_v2',
+}
 
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
@@ -135,6 +141,12 @@ def _load_model(model_name: str):
 # /api/models
 # ---------------------------------------------------------------------------
 
+@app.get('/api/envs')
+def list_envs():
+    """Return list of env_ids for which maze data exists on disk."""
+    return {'envs': [e for e, d in MAZE_ENVS.items() if d.exists()]}
+
+
 @app.get('/api/models')
 def list_models():
     """Return sorted list of .pt filenames in the checkpoints/ directory."""
@@ -149,10 +161,12 @@ def list_models():
 # ---------------------------------------------------------------------------
 
 @app.get('/api/maze')
-def get_maze():
+def get_maze(env_id: str = 'PointMaze_UMaze-v3'):
     """
-    Return U-Maze wall rectangles pre-computed in the same normalised [-1, 1]
-    coordinate space used by the diffusion model.
+    Return maze wall rectangles in the normalised [-1, 1] coordinate space.
+
+    Query param:
+        env_id : one of the keys in MAZE_ENVS (default: PointMaze_UMaze-v3)
 
     Response shape:
         walls     : list of {cx, cy, hw, hh}  — centre + half-extents (normalised)
@@ -162,10 +176,13 @@ def get_maze():
         d_min     : [2]     — normalisation lower bound (world coords)
         d_max     : [2]     — normalisation upper bound (world coords)
     """
-    if not MAZE_DATA_DIR.exists():
-        raise HTTPException(status_code=404, detail=f'Maze data not found: {MAZE_DATA_DIR}')
+    if env_id not in MAZE_ENVS:
+        raise HTTPException(status_code=400, detail=f'Unknown env_id: {env_id!r}. Available: {list(MAZE_ENVS)}')
+    maze_data_dir = MAZE_ENVS[env_id]
+    if not maze_data_dir.exists():
+        raise HTTPException(status_code=404, detail=f'Maze data not found: {maze_data_dir}')
 
-    meta      = json.loads((MAZE_DATA_DIR / 'metadata.json').read_text())
+    meta      = json.loads((maze_data_dir / 'metadata.json').read_text())
     maze_map  = meta['maze_map']
     cell_size = float(meta['cell_size'])
     d_min     = meta['norm']['d_min']   # [x_min, y_min]
@@ -194,10 +211,15 @@ def get_maze():
                 cx, cy = to_norm(wx, wy)
                 walls.append({'cx': cx, 'cy': cy, 'hw': half_w, 'hh': half_h})
 
+    # Canvas bounds: normalized [-1, 1] plus two wall-cell widths of padding
+    padding  = max(half_w, half_h) * 2
+    view_min = round(-(1.0 + padding), 3)
+    view_max = round(  1.0 + padding,  3)
+
     return {
         'walls':    walls,
-        'view_min': -1.9,
-        'view_max':  1.9,
+        'view_min': view_min,
+        'view_max': view_max,
         'maze_map': maze_map,
         'd_min':    d_min,
         'd_max':    d_max,

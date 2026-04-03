@@ -21,9 +21,9 @@ const zoomStates = {};   // keyed by SVG id → d3.ZoomTransform
 let obstaclePos = { x: 0.0, y: 0.0 };
 let params = { c: 1.0, k1: 1.0, k2: 1.0, r: 0.3, gamma_delta: 0.05, alpha0: 1.0 };
 
-/* ── World bounds — extended to show U-Maze outer walls ──────────── */
-const WORLD_MIN = -1.9;
-const WORLD_MAX =  1.9;
+/* ── World bounds — updated from /api/maze response for each env ─── */
+let WORLD_MIN = -1.9;
+let WORLD_MAX =  1.9;
 
 /* ── Three SVG selections ─────────────────────────────────────────── */
 const svgP = d3.select('#plain-svg');    // plain (left)
@@ -58,11 +58,14 @@ const btnNext         = document.getElementById('step-next');
 const DEFAULTS_KEY = 'safedpm_umaze_defaults';
 
 window.addEventListener('DOMContentLoaded', async () => {
-  await fetchMaze();     // load maze geometry before building canvases
+  await fetchEnvs();     // populate env dropdown first
+  const defaultEnv = document.getElementById('env-select').value;
+  await fetchMaze(defaultEnv);   // load maze geometry before building canvases
   loadDefaults();        // restore saved params before binding controls
   fetchModels();
   buildCanvases();
   bindParamControls();
+  bindEnvSelect();
   bindRunButton();
   bindScrubber();
   bindKeyboard();
@@ -76,11 +79,43 @@ window.addEventListener('DOMContentLoaded', async () => {
    MAZE  — fetch wall geometry from /api/maze
    ════════════════════════════════════════════════════════════════════ */
 
-async function fetchMaze() {
+async function fetchMaze(envId) {
   try {
-    const res = await fetch(`${API}/api/maze`);
-    if (res.ok) mazeData = await res.json();
+    const url = envId ? `${API}/api/maze?env_id=${encodeURIComponent(envId)}` : `${API}/api/maze`;
+    const res = await fetch(url);
+    if (res.ok) {
+      mazeData  = await res.json();
+      WORLD_MIN = mazeData.view_min;
+      WORLD_MAX = mazeData.view_max;
+      xS.domain([WORLD_MIN, WORLD_MAX]);
+      yS.domain([WORLD_MIN, WORLD_MAX]);
+    }
   } catch (e) { console.warn('Maze fetch failed:', e); }
+}
+
+async function fetchEnvs() {
+  try {
+    const res  = await fetch(`${API}/api/envs`);
+    const data = await res.json();
+    const sel  = document.getElementById('env-select');
+    sel.innerHTML = '';
+    (data.envs || []).forEach(e => {
+      const opt = document.createElement('option');
+      opt.value = e; opt.textContent = e;
+      if (e === 'PointMaze_UMaze-v3') opt.selected = true;
+      sel.appendChild(opt);
+    });
+    if (!data.envs || !data.envs.length)
+      sel.innerHTML = '<option value="">No envs found</option>';
+  } catch (e) { console.warn('Envs fetch failed:', e); }
+}
+
+function bindEnvSelect() {
+  document.getElementById('env-select').addEventListener('change', async function() {
+    await fetchMaze(this.value);
+    buildCanvases();
+    if (cachedData) renderCurrentStep();
+  });
 }
 
 function drawMazeWalls(svgSel) {

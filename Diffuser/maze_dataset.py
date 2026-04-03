@@ -29,6 +29,44 @@ import torch
 from torch.utils.data import Dataset
 
 
+# Root of all preprocessed maze datasets — relative to this file
+DATA_ROOT = Path(__file__).parent / 'data'
+
+# Registry: short name → subdirectory under DATA_ROOT
+KNOWN_DATASETS: dict[str, str] = {
+    'umaze_v2': 'umaze_v2',
+    'large_v2': 'large_v2',
+}
+
+
+def list_datasets() -> list[str]:
+    """Return names of datasets that exist on disk."""
+    return [name for name, subdir in KNOWN_DATASETS.items()
+            if (DATA_ROOT / subdir).exists()]
+
+
+def load_dataset(name_or_path: str | Path, xy_only: bool = False) -> 'MazeDataset':
+    """
+    Load a MazeDataset by short name or explicit path.
+
+    Examples
+    --------
+        ds = load_dataset('large_v2')          # uses DATA_ROOT/large_v2
+        ds = load_dataset('umaze_v2', xy_only=True)
+        ds = load_dataset('/abs/path/to/data') # explicit path still works
+    """
+    p = Path(name_or_path)
+    if not p.is_absolute() and str(name_or_path) in KNOWN_DATASETS:
+        p = DATA_ROOT / KNOWN_DATASETS[str(name_or_path)]
+    if not p.exists():
+        known = list(KNOWN_DATASETS.keys())
+        raise FileNotFoundError(
+            f"Dataset {name_or_path!r} not found. "
+            f"Known names: {known}. Available on disk: {list_datasets()}"
+        )
+    return MazeDataset(p, xy_only=xy_only)
+
+
 # ── Maze rendering helper ─────────────────────────────────────────────────────
 
 def render_maze_ax(ax, maze_map, cell_size=1.0, wall_color="#333333"):
