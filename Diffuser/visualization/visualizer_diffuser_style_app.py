@@ -160,6 +160,58 @@ def list_models():
 # /api/maze  — wall geometry in normalised coordinates
 # ---------------------------------------------------------------------------
 
+def _build_maze_data(env_id: str) -> dict:
+    """
+    Load maze geometry for *env_id* and return a dict with walls, view bounds,
+    raw maze_map, normalisation params, and grid dimensions.
+
+    Raises HTTPException on unknown or missing env.
+    """
+    if env_id not in MAZE_ENVS:
+        raise HTTPException(status_code=400, detail=f'Unknown env_id: {env_id!r}. Available: {list(MAZE_ENVS)}')
+    maze_data_dir = MAZE_ENVS[env_id]
+    if not maze_data_dir.exists():
+        raise HTTPException(status_code=404, detail=f'Maze data not found: {maze_data_dir}')
+
+    meta      = json.loads((maze_data_dir / 'metadata.json').read_text())
+    maze_map  = meta['maze_map']
+    cell_size = float(meta['cell_size'])
+    d_min     = meta['norm']['d_min']   # [x_min, y_min]
+    d_max     = meta['norm']['d_max']   # [x_max, y_max]
+    d_range   = [d_max[0] - d_min[0], d_max[1] - d_min[1]]
+    n_rows    = len(maze_map)
+    n_cols    = len(maze_map[0])
+    half_w    = cell_size / d_range[0]
+    half_h    = cell_size / d_range[1]
+
+    walls = []
+    for r in range(n_rows):
+        for c in range(n_cols):
+            if maze_map[r][c] == 1:
+                wx = (c - (n_cols - 1) / 2.0) * cell_size
+                wy = ((n_rows - 1) / 2.0 - r)  * cell_size
+                nx = 2.0 * (wx - d_min[0]) / d_range[0] - 1.0
+                ny = 2.0 * (wy - d_min[1]) / d_range[1] - 1.0
+                walls.append({'cx': nx, 'cy': ny, 'hw': half_w, 'hh': half_h})
+
+    padding  = max(half_w, half_h) * 2
+    view_min = round(-(1.0 + padding), 3)
+    view_max = round(  1.0 + padding,  3)
+
+    return {
+        'walls':     walls,
+        'view_min':  view_min,
+        'view_max':  view_max,
+        'maze_map':  maze_map,
+        'd_min':     d_min,
+        'd_max':     d_max,
+        'cell_size': cell_size,
+        'd_range':   d_range,
+        'n_rows':    n_rows,
+        'n_cols':    n_cols,
+    }
+
+
 @app.get('/api/maze')
 def get_maze(env_id: str = 'PointMaze_UMaze-v3'):
     """
@@ -176,53 +228,14 @@ def get_maze(env_id: str = 'PointMaze_UMaze-v3'):
         d_min     : [2]     — normalisation lower bound (world coords)
         d_max     : [2]     — normalisation upper bound (world coords)
     """
-    if env_id not in MAZE_ENVS:
-        raise HTTPException(status_code=400, detail=f'Unknown env_id: {env_id!r}. Available: {list(MAZE_ENVS)}')
-    maze_data_dir = MAZE_ENVS[env_id]
-    if not maze_data_dir.exists():
-        raise HTTPException(status_code=404, detail=f'Maze data not found: {maze_data_dir}')
-
-    meta      = json.loads((maze_data_dir / 'metadata.json').read_text())
-    maze_map  = meta['maze_map']
-    cell_size = float(meta['cell_size'])
-    d_min     = meta['norm']['d_min']   # [x_min, y_min]
-    d_max     = meta['norm']['d_max']   # [x_max, y_max]
-    d_range   = [d_max[0] - d_min[0], d_max[1] - d_min[1]]
-
-    n_rows = len(maze_map)
-    n_cols = len(maze_map[0])
-
-    def to_norm(wx: float, wy: float):
-        nx = 2.0 * (wx - d_min[0]) / d_range[0] - 1.0
-        ny = 2.0 * (wy - d_min[1]) / d_range[1] - 1.0
-        return nx, ny
-
-    # Half-extents of one cell in normalised space
-    half_w = cell_size / d_range[0]
-    half_h = cell_size / d_range[1]
-
-    walls = []
-    for r in range(n_rows):
-        for c in range(n_cols):
-            if maze_map[r][c] == 1:
-                # World-coordinate centre of cell (r, c)
-                wx = (c - (n_cols - 1) / 2.0) * cell_size
-                wy = ((n_rows - 1) / 2.0 - r)  * cell_size
-                cx, cy = to_norm(wx, wy)
-                walls.append({'cx': cx, 'cy': cy, 'hw': half_w, 'hh': half_h})
-
-    # Canvas bounds: normalized [-1, 1] plus two wall-cell widths of padding
-    padding  = max(half_w, half_h) * 2
-    view_min = round(-(1.0 + padding), 3)
-    view_max = round(  1.0 + padding,  3)
-
+    mdata = _build_maze_data(env_id)
     return {
-        'walls':    walls,
-        'view_min': view_min,
-        'view_max': view_max,
-        'maze_map': maze_map,
-        'd_min':    d_min,
-        'd_max':    d_max,
+        'walls':    mdata['walls'],
+        'view_min': mdata['view_min'],
+        'view_max': mdata['view_max'],
+        'maze_map': mdata['maze_map'],
+        'd_min':    mdata['d_min'],
+        'd_max':    mdata['d_max'],
     }
 
 
@@ -338,6 +351,146 @@ def run_optimisation(req: RunRequest):
         'cbf_step_data':  cbf_history,
         'plain_time':     round(plain_time, 3),
         'safe_time':      round(safe_time,  3),
+    }
+
+
+# ---------------------------------------------------------------------------
+# /api/batch_run  — run N samples (random free-cell starts/goals) in one GPU batch
+# ---------------------------------------------------------------------------
+
+class BatchRunRequest(BaseModel):
+    model_name:   str   = 've_unet_umaze_diffuser.pt'
+    env_id:       str   = 'PointMaze_UMaze-v3'
+    n_steps:      int   = 20
+    n_samples:    int   = 100
+    c:            float = 1.0
+    k1:           float = 1.0
+    k2:           float = 1.0
+    r:            float = 0.1
+    gamma_delta:  float = 0.0
+    obs_x:        float = 0.0
+    obs_y:        float = 0.0
+    alpha0:       float = 1.0
+    use_softplus: bool  = True
+    seed:         Optional[int] = None
+
+
+@app.post('/api/batch_run')
+def batch_run(req: BatchRunRequest):
+    """
+    Run N independent trajectories with random start/goal pairs sampled from
+    free cells of the maze.  Both plain and safe DPM are run as a single
+    batched GPU forward pass.  Returns only final trajectories.
+
+    Response shape:
+        plain_trajs : [N, T, 2]
+        safe_trajs  : [N, T, 2]
+        starts      : [N, 2]
+        goals       : [N, 2]
+        walls       : list of {cx, cy, hw, hh}
+        view_min, view_max : float
+        n_samples, T_steps, n_steps, obs_x, obs_y, r, gamma_delta, env_id
+        plain_time, safe_time  (seconds)
+        mode        : 'maze'
+    """
+    try:
+        ema_model, ve, T_steps = _load_model(req.model_name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f'Model load error: {exc}')
+
+    k2 = max(req.k2, 1e-3)
+    N  = req.n_samples
+
+    # Maze geometry + free-cell list
+    mdata     = _build_maze_data(req.env_id)
+    maze_map  = mdata['maze_map']
+    cell_size = mdata['cell_size']
+    d_min     = mdata['d_min']
+    d_range   = mdata['d_range']
+    n_rows    = mdata['n_rows']
+    n_cols    = mdata['n_cols']
+
+    free_cells = []
+    for r in range(n_rows):
+        for c in range(n_cols):
+            if maze_map[r][c] == 0:
+                wx = (c - (n_cols - 1) / 2.0) * cell_size
+                wy = ((n_rows - 1) / 2.0 - r)  * cell_size
+                nx = 2.0 * (wx - d_min[0]) / d_range[0] - 1.0
+                ny = 2.0 * (wy - d_min[1]) / d_range[1] - 1.0
+                free_cells.append([nx, ny])
+
+    if len(free_cells) == 0:
+        raise HTTPException(status_code=500, detail='No free cells found in maze')
+
+    if req.seed is not None:
+        torch.manual_seed(req.seed)
+
+    free_t = torch.tensor(free_cells, dtype=torch.float32, device=DEVICE)  # [F, 2]
+    F      = len(free_t)
+    idx_s  = torch.randint(0, F, (N,))
+    idx_g  = torch.randint(0, F, (N,))
+    starts = free_t[idx_s]  # [N, 2]
+    goals  = free_t[idx_g]  # [N, 2]
+
+    obstacles = torch.tensor([[req.obs_x, req.obs_y, req.r]], dtype=torch.float32, device=DEVICE)
+
+    # Build batched prior [N, T_steps, 2]
+    sigmas    = ve.sigmas.to(DEVICE)
+    N_lvl     = ve.n_levels
+    indices   = torch.linspace(N_lvl, 0, req.n_steps + 1).long().clamp(0, N_lvl)
+    sigma_seq = sigmas[indices]
+    x_init    = torch.randn(N, T_steps, 2, device=DEVICE) * sigma_seq[0]
+
+    import time
+    try:
+        t0 = time.perf_counter()
+        plain = dpm_solver_1_sample(
+            ema_model, ve,
+            x_start=starts, x_goal=goals,
+            T_steps=T_steps, n_steps=req.n_steps,
+            device=DEVICE, x_init=x_init.clone(),
+            return_history=False,
+        )  # [N, T, 2]
+        plain_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        safe = dpm_solver_1_cbf_sample(
+            ema_model, ve,
+            x_start=starts, x_goal=goals,
+            obstacles=obstacles,
+            T_steps=T_steps, n_steps=req.n_steps,
+            k1=req.k1, k2=k2, c=req.c,
+            alpha0=req.alpha0, gamma_delta=req.gamma_delta,
+            use_softplus=req.use_softplus,
+            device=DEVICE, x_init=x_init.clone(),
+            return_history=False,
+        )  # [N, T, 2]
+        safe_time = time.perf_counter() - t0
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f'Batch sampler error: {exc}')
+
+    return {
+        'plain_trajs': plain.cpu().tolist(),
+        'safe_trajs':  safe.cpu().tolist(),
+        'starts':      starts.cpu().tolist(),
+        'goals':       goals.cpu().tolist(),
+        'walls':       mdata['walls'],
+        'view_min':    mdata['view_min'],
+        'view_max':    mdata['view_max'],
+        'n_samples':   N,
+        'T_steps':     T_steps,
+        'n_steps':     req.n_steps,
+        'obs_x':       req.obs_x,
+        'obs_y':       req.obs_y,
+        'r':           req.r,
+        'gamma_delta': req.gamma_delta,
+        'env_id':      req.env_id,
+        'plain_time':  round(plain_time, 3),
+        'safe_time':   round(safe_time,  3),
+        'mode':        'maze',
     }
 
 

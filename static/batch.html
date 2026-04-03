@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SafeDPM — Batch Results</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0f1117;
+      color: #c9d1d9;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 13px;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Header ─────────────────────────────────────────────────────── */
+    #header {
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      padding: 7px 14px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    #header h2 {
+      font-size: 14px;
+      font-weight: 700;
+      color: #e6edf3;
+      white-space: nowrap;
+    }
+    #meta-bar {
+      color: #8b949e;
+      font-size: 11px;
+      flex: 1;
+    }
+    #time-bar {
+      color: #8b949e;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    /* ── Legend ─────────────────────────────────────────────────────── */
+    #legend {
+      background: #0d1117;
+      border-bottom: 1px solid #21262d;
+      padding: 5px 14px;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      flex-shrink: 0;
+      font-size: 11px;
+      color: #8b949e;
+    }
+    .legend-item { display: flex; align-items: center; gap: 5px; }
+    .legend-line-plain { display: inline-block; width: 24px; height: 2px; background: #79c0ff; border-radius: 1px; }
+    .legend-line-safe  { display: inline-block; width: 24px; height: 2px; background: #3ddc84; border-radius: 1px; }
+    .legend-sq   { display: inline-block; width: 8px; height: 8px; background: #3ddc84; }
+    .legend-star { color: #e3b341; font-size: 12px; line-height: 1; }
+
+    /* ── Scrollable grid ─────────────────────────────────────────────── */
+    #grid-wrap {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 8px;
+    }
+
+    #batch-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 6px;
+      align-content: start;
+    }
+
+    /* ── Sample card ─────────────────────────────────────────────────── */
+    .sample-card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 5px;
+      overflow: hidden;
+    }
+    .card-header {
+      padding: 3px 7px;
+      font-size: 10px;
+      color: #8b949e;
+      border-bottom: 1px solid #30363d;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .card-canvases {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1px;
+      background: #21262d;
+    }
+    .mini-wrap {
+      background: #0d1117;
+      position: relative;
+    }
+    .mini-label {
+      position: absolute;
+      top: 3px; left: 4px;
+      font-size: 9px;
+      font-weight: 600;
+      opacity: 0.75;
+      pointer-events: none;
+    }
+    .mini-label.plain { color: #79c0ff; }
+    .mini-label.safe  { color: #3ddc84; }
+    svg.mini-svg {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    /* ── Error ───────────────────────────────────────────────────────── */
+    #error-msg {
+      display: flex; align-items: center; justify-content: center;
+      height: 100%; color: #f85149; font-size: 14px;
+      padding: 24px; text-align: center;
+    }
+  </style>
+</head>
+<body>
+
+<div id="header">
+  <h2>Batch Sample Results</h2>
+  <div id="meta-bar">Loading…</div>
+  <div id="time-bar"></div>
+</div>
+
+<div id="legend">
+  <div class="legend-item"><span class="legend-line-plain"></span> Plain DPM</div>
+  <div class="legend-item"><span class="legend-line-safe"></span>  Safe DPM</div>
+  <div class="legend-item"><span class="legend-sq"></span> Start</div>
+  <div class="legend-item"><span class="legend-star">★</span> Goal</div>
+</div>
+
+<div id="grid-wrap">
+  <div id="batch-grid"></div>
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+/* ── Load data ───────────────────────────────────────────────────── */
+const raw = sessionStorage.getItem('batchData');
+if (!raw) {
+  document.getElementById('grid-wrap').innerHTML =
+    '<div id="error-msg">No batch data found — run Batch 100 from the main visualiser page.</div>';
+  throw new Error('No batchData in sessionStorage');
+}
+
+const d = JSON.parse(raw);
+const N = d.n_samples;
+
+/* ── Header ─────────────────────────────────────────────────────── */
+document.getElementById('meta-bar').textContent =
+  (d.env_id ? `env: ${d.env_id}  |  ` : '') +
+  `N=${N}  |  n_steps=${d.n_steps}  |  T=${d.T_steps}  |  ` +
+  `r=${d.r.toFixed(3)}  obs=(${d.obs_x.toFixed(3)}, ${d.obs_y.toFixed(3)})  |  ` +
+  `\u03B3\u03B4=${d.gamma_delta}`;
+
+document.getElementById('time-bar').textContent =
+  `plain: ${d.plain_time}s  |  safe: ${d.safe_time}s`;
+
+/* ── World bounds ────────────────────────────────────────────────── */
+const WORLD_MIN = d.view_min != null ? d.view_min : -1.5;
+const WORLD_MAX = d.view_max != null ? d.view_max :  1.5;
+
+/* ── ViewBox dimensions (fixed coordinate space for each mini-SVG) ─ */
+const VB = 160;  // viewBox 0..VB square
+
+const xS = d3.scaleLinear().domain([WORLD_MIN, WORLD_MAX]).range([6, VB - 6]);
+const yS = d3.scaleLinear().domain([WORLD_MIN, WORLD_MAX]).range([VB - 6, 6]);
+const gen = d3.line().x(p => xS(p[0])).y(p => yS(p[1]));
+
+/* Pre-compute wall rects in viewBox space (same for every card) */
+const wallRects = (d.mode === 'maze' && Array.isArray(d.walls))
+  ? d.walls.map(w => ({
+      x:  xS(w.cx - w.hw),
+      y:  yS(w.cy + w.hh),
+      w:  Math.abs(xS(w.cx + w.hw) - xS(w.cx - w.hw)),
+      h:  Math.abs(yS(w.cy - w.hh) - yS(w.cy + w.hh)),
+    }))
+  : [];
+
+/* ── Draw one mini-SVG ───────────────────────────────────────────── */
+function drawMini(container, traj, start, goal, color) {
+  const svgEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svgEl.classList.add('mini-svg');
+  svgEl.setAttribute('viewBox', `0 0 ${VB} ${VB}`);
+  svgEl.setAttribute('xmlns',   'http://www.w3.org/2000/svg');
+  container.appendChild(svgEl);
+
+  const svg = d3.select(svgEl);
+
+  /* Background */
+  svg.append('rect').attr('width', VB).attr('height', VB).attr('fill', '#0d1117');
+
+  /* Maze walls */
+  if (wallRects.length) {
+    const g = svg.append('g');
+    wallRects.forEach(w => {
+      g.append('rect')
+        .attr('x', w.x).attr('y', w.y)
+        .attr('width', w.w).attr('height', w.h)
+        .attr('fill', '#2e3350')
+        .attr('stroke', '#3a4060')
+        .attr('stroke-width', 0.4);
+    });
+  }
+
+  /* Trajectory */
+  svg.append('path')
+    .attr('d',            gen(traj))
+    .attr('fill',         'none')
+    .attr('stroke',       color)
+    .attr('stroke-width', 1.4);
+
+  /* Start marker — green square */
+  svg.append('rect')
+    .attr('x', xS(start[0]) - 3).attr('y', yS(start[1]) - 3)
+    .attr('width', 6).attr('height', 6)
+    .attr('fill', '#3ddc84');
+
+  /* Goal marker — gold star */
+  svg.append('text')
+    .attr('x',            xS(goal[0]))
+    .attr('y',            yS(goal[1]) + 4)
+    .attr('text-anchor',  'middle')
+    .attr('font-size',    11)
+    .attr('fill',         '#e3b341')
+    .text('\u2605');
+
+  /* Obstacle — drawn last so it is always on top of trajectories */
+  if (d.r > 0) {
+    const rPx = Math.abs(xS(d.r) - xS(0));
+    svg.append('circle')
+      .attr('cx', xS(d.obs_x)).attr('cy', yS(d.obs_y))
+      .attr('r',  rPx)
+      .attr('fill',         'rgba(248,81,73,0.18)')
+      .attr('stroke',       '#f85149')
+      .attr('stroke-width', 1.5);
+  }
+}
+
+/* ── Build all cards ─────────────────────────────────────────────── */
+const grid = document.getElementById('batch-grid');
+
+for (let i = 0; i < N; i++) {
+  const card = document.createElement('div');
+  card.className = 'sample-card';
+
+  const [sx, sy] = d.starts[i];
+  const [gx, gy] = d.goals[i];
+  card.innerHTML = `
+    <div class="card-header">
+      #${i + 1} &nbsp; start (${sx.toFixed(2)}, ${sy.toFixed(2)}) &rarr; goal (${gx.toFixed(2)}, ${gy.toFixed(2)})
+    </div>
+    <div class="card-canvases">
+      <div class="mini-wrap" id="plain-wrap-${i}">
+        <span class="mini-label plain">Plain</span>
+      </div>
+      <div class="mini-wrap" id="safe-wrap-${i}">
+        <span class="mini-label safe">Safe</span>
+      </div>
+    </div>`;
+
+  grid.appendChild(card);
+
+  drawMini(
+    document.getElementById(`plain-wrap-${i}`),
+    d.plain_trajs[i], d.starts[i], d.goals[i],
+    '#79c0ff',
+  );
+  drawMini(
+    document.getElementById(`safe-wrap-${i}`),
+    d.safe_trajs[i],  d.starts[i], d.goals[i],
+    '#3ddc84',
+  );
+}
+</script>
+</body>
+</html>

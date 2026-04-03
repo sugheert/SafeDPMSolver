@@ -77,6 +77,17 @@ body {
 #run-btn:active { background: #3a66cc; }
 #run-btn:disabled { background: #444; cursor: not-allowed; }
 
+#batch-btn {
+  background: #1e7d5c; color: #fff;
+  border: none; border-radius: 5px;
+  padding: 6px 14px; font-weight: 600; font-size: 13px;
+  cursor: pointer; white-space: nowrap;
+  transition: background 0.15s;
+}
+#batch-btn:hover    { background: #27a87a; }
+#batch-btn:active   { background: #155c43; }
+#batch-btn:disabled { background: #444; cursor: not-allowed; }
+
 /* Step scrubber group */
 .scrubber-group {
   display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0;

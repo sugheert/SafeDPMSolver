@@ -62,6 +62,7 @@ window.addEventListener('DOMContentLoaded', () => {
   buildCanvases();
   bindParamControls();
   bindRunButton();
+  bindBatchButton();
   bindScrubber();
   bindKeyboard();
   bindStepButtons();
@@ -661,6 +662,57 @@ function bindParamControls() {
    ════════════════════════════════════════════════════════════════════ */
 
 function bindRunButton() { runBtn.addEventListener('click', runOptimisation); }
+
+/* ════════════════════════════════════════════════════════════════════
+   BATCH RUN  — 100 random-start/goal samples in one GPU batch
+   ════════════════════════════════════════════════════════════════════ */
+
+function bindBatchButton() {
+  document.getElementById('batch-btn').addEventListener('click', runBatch);
+}
+
+async function runBatch() {
+  const modelName = document.getElementById('model-select').value;
+  if (!modelName) { alert('Select a model first.'); return; }
+  const nSteps = parseInt(document.getElementById('n-steps-input').value, 10) || 20;
+  params.k2           = Math.max(0.01, parseFloat(document.getElementById('k2-input').value)    || 1.0);
+  params.alpha0       = Math.max(0.0,  parseFloat(document.getElementById('alpha0-input').value) || 1.0);
+  params.use_softplus = document.getElementById('softplus-check').checked;
+
+  const btn = document.getElementById('batch-btn');
+  btn.disabled = true;
+  btn.textContent = 'Running\u2026';
+  try {
+    const res = await fetch(`${API}/api/batch_run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model_name:   modelName,
+        n_steps:      nSteps,
+        n_samples:    100,
+        c:            params.c,
+        k1:           params.k1,
+        k2:           params.k2,
+        r:            params.r,
+        gamma_delta:  params.gamma_delta,
+        alpha0:       params.alpha0,
+        use_softplus: params.use_softplus,
+        obs_x:        obstaclePos.x,
+        obs_y:        obstaclePos.y,
+      }),
+    });
+    if (!res.ok) { const e = await res.json(); throw new Error(e.detail || res.statusText); }
+    const data = await res.json();
+    sessionStorage.setItem('batchData', JSON.stringify(data));
+    window.open('/static/batch.html', '_blank');
+  } catch (e) {
+    alert(`Batch run failed: ${e.message}`);
+    console.error(e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '\u25BA\u25BA\u00A0Batch\u00A0100';
+  }
+}
 
 async function runOptimisation() {
   const modelName = document.getElementById('model-select').value;

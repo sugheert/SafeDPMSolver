@@ -229,6 +229,113 @@ def run_optimisation(req: RunRequest):
 
 
 # ---------------------------------------------------------------------------
+# /api/batch_run  — run 100 samples (random starts/goals) in one GPU batch
+# ---------------------------------------------------------------------------
+
+class BatchRunRequest(BaseModel):
+    model_name:   str   = 've_unet_circles_100k.pt'
+    n_steps:      int   = 20
+    n_samples:    int   = 100
+    c:            float = 1.0
+    k1:           float = 1.0
+    k2:           float = 1.0
+    r:            float = 0.1
+    gamma_delta:  float = 0.0
+    obs_x:        float = 0.0
+    obs_y:        float = 0.0
+    alpha0:       float = 1.0
+    use_softplus: bool  = True
+    seed:         Optional[int] = None
+
+
+@app.post('/api/batch_run')
+def batch_run(req: BatchRunRequest):
+    """
+    Run N independent trajectories (random starts/goals) in a single batched
+    GPU forward pass.  Returns only final trajectories (no step history).
+
+    Response shape:
+        plain_trajs : [N, T, 2]
+        safe_trajs  : [N, T, 2]
+        starts      : [N, 2]
+        goals       : [N, 2]
+        n_samples, T_steps, n_steps, obs_x, obs_y, r, gamma_delta
+        plain_time, safe_time  (seconds)
+        mode        : 'circles'
+    """
+    try:
+        ema_model, ve, T_steps = _load_model(req.model_name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f'Model load error: {exc}')
+
+    k2 = max(req.k2, 1e-3)
+    N  = req.n_samples
+
+    if req.seed is not None:
+        torch.manual_seed(req.seed)
+
+    obstacles = torch.tensor([[req.obs_x, req.obs_y, req.r]], dtype=torch.float32, device=DEVICE)
+
+    # Random starts/goals uniformly in [-0.9, 0.9]²
+    starts = (torch.rand(N, 2, device=DEVICE) * 2 - 1) * 0.9   # [N, 2]
+    goals  = (torch.rand(N, 2, device=DEVICE) * 2 - 1) * 0.9   # [N, 2]
+
+    # Build batched prior [N, T_steps, 2]
+    sigmas    = ve.sigmas.to(DEVICE)
+    N_lvl     = ve.n_levels
+    indices   = torch.linspace(N_lvl, 0, req.n_steps + 1).long().clamp(0, N_lvl)
+    sigma_seq = sigmas[indices]
+    x_init    = torch.randn(N, T_steps, 2, device=DEVICE) * sigma_seq[0]
+
+    import time
+    try:
+        t0 = time.perf_counter()
+        plain = dpm_solver_1_sample(
+            ema_model, ve,
+            x_start=starts, x_goal=goals,
+            T_steps=T_steps, n_steps=req.n_steps,
+            device=DEVICE, x_init=x_init.clone(),
+            return_history=False,
+        )  # [N, T, 2]
+        plain_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        safe = dpm_solver_1_cbf_sample(
+            ema_model, ve,
+            x_start=starts, x_goal=goals,
+            obstacles=obstacles,
+            T_steps=T_steps, n_steps=req.n_steps,
+            k1=req.k1, k2=k2, c=req.c,
+            alpha0=req.alpha0, gamma_delta=req.gamma_delta,
+            use_softplus=req.use_softplus,
+            device=DEVICE, x_init=x_init.clone(),
+            return_history=False,
+        )  # [N, T, 2]
+        safe_time = time.perf_counter() - t0
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f'Batch sampler error: {exc}')
+
+    return {
+        'plain_trajs': plain.cpu().tolist(),
+        'safe_trajs':  safe.cpu().tolist(),
+        'starts':      starts.cpu().tolist(),
+        'goals':       goals.cpu().tolist(),
+        'n_samples':   N,
+        'T_steps':     T_steps,
+        'n_steps':     req.n_steps,
+        'obs_x':       req.obs_x,
+        'obs_y':       req.obs_y,
+        'r':           req.r,
+        'gamma_delta': req.gamma_delta,
+        'plain_time':  round(plain_time, 3),
+        'safe_time':   round(safe_time,  3),
+        'mode':        'circles',
+    }
+
+
+# ---------------------------------------------------------------------------
 # /api/math   — live re-evaluation for a given traj + parameters
 # ---------------------------------------------------------------------------
 
