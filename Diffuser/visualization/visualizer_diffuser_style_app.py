@@ -260,6 +260,7 @@ class RunRequest(BaseModel):
     alpha0:      float = 1.0
     use_softplus: bool = True
     seed:        Optional[int] = None
+    init_traj:   Optional[List[List[float]]] = None  # [T, 2] warm-start trajectory
 
 
 @app.post('/api/run')
@@ -297,14 +298,19 @@ def run_optimisation(req: RunRequest):
     x_start = torch.tensor([req.start_x, req.start_y], dtype=torch.float32, device=DEVICE)
     x_goal  = torch.tensor([req.goal_x,  req.goal_y],  dtype=torch.float32, device=DEVICE)
 
-    # Sample shared prior
+    # Sample shared prior (or warm-start from provided trajectory)
     if req.seed is not None:
         torch.manual_seed(req.seed)
     sigmas    = ve.sigmas.to(DEVICE)
     N_lvl     = ve.n_levels
     indices   = torch.linspace(N_lvl, 0, req.n_steps + 1).long().clamp(0, N_lvl)
     sigma_seq = sigmas[indices]
-    x_init    = torch.randn(1, T_steps, 2, device=DEVICE) * sigma_seq[0]
+    if req.init_traj is not None:
+        # Warm start: add full noise on top of the provided clean trajectory
+        base   = torch.tensor(req.init_traj, dtype=torch.float32, device=DEVICE).unsqueeze(0)  # [1, T, 2]
+        x_init = base + torch.randn_like(base) * sigma_seq[0]
+    else:
+        x_init = torch.randn(1, T_steps, 2, device=DEVICE) * sigma_seq[0]
 
     import time
 

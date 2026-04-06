@@ -19,6 +19,8 @@ let mazeData          = null;  // populated by fetchMaze() on page load
 const zoomStates = {};   // keyed by SVG id → d3.ZoomTransform
 
 let obstaclePos = { x: 0.0, y: 0.0 };
+let startPos    = { x: -0.8, y: -0.8 };
+let goalPos     = { x:  0.8, y:  0.8 };
 let params = { c: 1.0, k1: 1.0, k2: 1.0, r: 0.3, gamma_delta: 0.05, alpha0: 1.0 };
 
 /* ── World bounds — updated from /api/maze response for each env ─── */
@@ -38,6 +40,7 @@ const yS = d3.scaleLinear().domain([WORLD_MIN, WORLD_MAX]).range([SZ - 32, 16]);
 /* ── DOM refs ─────────────────────────────────────────────────────── */
 const overlay         = document.getElementById('loading-overlay');
 const runBtn          = document.getElementById('run-btn');
+const reinitBtn       = document.getElementById('reinit-btn');
 const scrubber        = document.getElementById('step-scrubber');
 const stepLabel       = document.getElementById('step-label');
 const stepMax         = document.getElementById('step-max');
@@ -62,17 +65,24 @@ window.addEventListener('DOMContentLoaded', async () => {
   const defaultEnv = document.getElementById('env-select').value;
   await fetchMaze(defaultEnv);   // load maze geometry before building canvases
   loadDefaults();        // restore saved params before binding controls
+  // Sync startPos/goalPos from inputs (which may have been restored by loadDefaults)
+  startPos.x = parseFloat(document.getElementById('start-x-input').value) || -0.8;
+  startPos.y = parseFloat(document.getElementById('start-y-input').value) || -0.8;
+  goalPos.x  = parseFloat(document.getElementById('goal-x-input').value)  ||  0.8;
+  goalPos.y  = parseFloat(document.getElementById('goal-y-input').value)  ||  0.8;
   fetchModels();
   buildCanvases();
   bindParamControls();
   bindEnvSelect();
   bindRunButton();
+  bindReinitButton();
   bindBatchButton();
   bindScrubber();
   bindKeyboard();
   bindStepButtons();
   bindInspectorResize();
   bindSaveDefaults();
+  bindStartGoalInputs();
   window.addEventListener('resize', () => { buildCanvases(); if (cachedData) renderCurrentStep(); });
 });
 
@@ -147,6 +157,10 @@ function saveDefaults() {
     obstaclePos: { ...obstaclePos },
     n_steps:    document.getElementById('n-steps-input').value,
     model_name: document.getElementById('model-select').value,
+    start_x:    document.getElementById('start-x-input').value,
+    start_y:    document.getElementById('start-y-input').value,
+    goal_x:     document.getElementById('goal-x-input').value,
+    goal_y:     document.getElementById('goal-y-input').value,
   };
   localStorage.setItem(DEFAULTS_KEY, JSON.stringify(snapshot));
 
@@ -176,6 +190,10 @@ function loadDefaults() {
     setEl('gd-val',       params.gamma_delta.toFixed(2));
     setEl('alpha0-input', params.alpha0);
     if (snap.n_steps) setEl('n-steps-input', snap.n_steps);
+    if (snap.start_x !== undefined) setEl('start-x-input', snap.start_x);
+    if (snap.start_y !== undefined) setEl('start-y-input', snap.start_y);
+    if (snap.goal_x  !== undefined) setEl('goal-x-input',  snap.goal_x);
+    if (snap.goal_y  !== undefined) setEl('goal-y-input',  snap.goal_y);
 
     if (snap.model_name) {
       const trySelect = () => {
@@ -365,14 +383,44 @@ function drawMarkersOn(svgSel) {
   const id = svgSel.attr('id');
   const g  = svgSel.select(`#${id}-markers`);
   g.selectAll('*').remove();
-  if (!cachedData) return;
-  const [sx, sy] = cachedData.start;
-  const [gx, gy] = cachedData.goal;
-  g.append('rect').attr('class','start-mk')
-    .attr('x', xS(sx)-6).attr('y', yS(sy)-6).attr('width',12).attr('height',12).attr('rx',2);
-  g.append('text')
-    .attr('x', xS(gx)).attr('y', yS(gy)+6).attr('text-anchor','middle')
-    .attr('font-size',18).attr('fill','#ffc107').text('★');
+
+  const startRect = g.append('rect').attr('class', 'start-mk')
+    .attr('x', xS(startPos.x) - 6).attr('y', yS(startPos.y) - 6)
+    .attr('width', 12).attr('height', 12).attr('rx', 2)
+    .style('cursor', 'grab');
+
+  const goalStar = g.append('text')
+    .attr('x', xS(goalPos.x)).attr('y', yS(goalPos.y) + 6)
+    .attr('text-anchor', 'middle').attr('font-size', 18).attr('fill', '#ffc107')
+    .text('★').style('cursor', 'grab');
+
+  const startDrag = d3.drag()
+    .on('drag', function(event) {
+      event.sourceEvent.stopPropagation();
+      startPos.x = xS.invert(event.x);
+      startPos.y = yS.invert(event.y);
+      document.getElementById('start-x-input').value = startPos.x.toFixed(3);
+      document.getElementById('start-y-input').value = startPos.y.toFixed(3);
+      drawMarkersOnAll();
+    });
+  startRect.call(startDrag);
+
+  const goalDrag = d3.drag()
+    .on('drag', function(event) {
+      event.sourceEvent.stopPropagation();
+      goalPos.x = xS.invert(event.x);
+      goalPos.y = yS.invert(event.y);
+      document.getElementById('goal-x-input').value = goalPos.x.toFixed(3);
+      document.getElementById('goal-y-input').value = goalPos.y.toFixed(3);
+      drawMarkersOnAll();
+    });
+  goalStar.call(goalDrag);
+}
+
+function drawMarkersOnAll() {
+  drawMarkersOn(svgP);
+  drawMarkersOn(svgB);
+  drawMarkersOn(svgA);
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -385,7 +433,11 @@ function attachBeforeDrag() {
     .filter(function(event) {
       if (!currentBeforeTraj) return false;
       let el = event.sourceEvent && event.sourceEvent.target;
-      while (el) { if (el.id === 'before-svg-obstacle') return false; el = el.parentElement; }
+      while (el) {
+        if (el.id === 'before-svg-obstacle') return false;
+        if (el.id === 'before-svg-markers')  return false;
+        el = el.parentElement;
+      }
       return true;
     })
     .on('start', function(event) {
@@ -714,10 +766,34 @@ function bindParamControls() {
 }
 
 /* ════════════════════════════════════════════════════════════════════
+   START / GOAL INPUT SYNC
+   ════════════════════════════════════════════════════════════════════ */
+
+function bindStartGoalInputs() {
+  const sync = () => {
+    startPos.x = parseFloat(document.getElementById('start-x-input').value) || -0.8;
+    startPos.y = parseFloat(document.getElementById('start-y-input').value) || -0.8;
+    goalPos.x  = parseFloat(document.getElementById('goal-x-input').value)  ||  0.8;
+    goalPos.y  = parseFloat(document.getElementById('goal-y-input').value)  ||  0.8;
+    drawMarkersOnAll();
+  };
+  ['start-x-input','start-y-input','goal-x-input','goal-y-input'].forEach(id =>
+    document.getElementById(id).addEventListener('change', sync)
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════
    RUN BUTTON
    ════════════════════════════════════════════════════════════════════ */
 
-function bindRunButton() { runBtn.addEventListener('click', runOptimisation); }
+function bindRunButton() { runBtn.addEventListener('click', () => runOptimisation()); }
+
+function bindReinitButton() {
+  reinitBtn.addEventListener('click', () => {
+    if (!currentSafeTraj) return;
+    runOptimisation(currentSafeTraj);
+  });
+}
 
 /* ════════════════════════════════════════════════════════════════════
    BATCH RUN  — 100 random free-cell start/goal samples in one GPU batch
@@ -772,7 +848,7 @@ async function runBatch() {
   }
 }
 
-async function runOptimisation() {
+async function runOptimisation(initTraj = null) {
   const modelName = document.getElementById('model-select').value;
   if (!modelName) { alert('Select a model first.'); return; }
   const nSteps  = parseInt(document.getElementById('n-steps-input').value,  10) || 20;
@@ -782,18 +858,21 @@ async function runOptimisation() {
 
   setLoading(true);
   try {
+    const body = {
+      model_name: modelName, n_steps: nSteps,
+      c: params.c, k1: params.k1, k2: params.k2,
+      r: params.r, gamma_delta: params.gamma_delta,
+      alpha0: params.alpha0, use_softplus: params.use_softplus,
+      obs_x: obstaclePos.x, obs_y: obstaclePos.y,
+      start_x: startPos.x, start_y: startPos.y,
+      goal_x:  goalPos.x,  goal_y:  goalPos.y,
+    };
+    if (initTraj) body.init_traj = initTraj;
+
     const res = await fetch(`${API}/api/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model_name: modelName, n_steps: nSteps,
-        c: params.c, k1: params.k1, k2: params.k2,
-        r: params.r, gamma_delta: params.gamma_delta,
-        alpha0: params.alpha0, use_softplus: params.use_softplus,
-        obs_x: obstaclePos.x, obs_y: obstaclePos.y,
-        start_x: -0.8, start_y: -0.8,
-        goal_x:   0.8, goal_y:   0.8,
-      }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) { const e = await res.json(); throw new Error(e.detail || res.statusText); }
 
@@ -804,6 +883,7 @@ async function runOptimisation() {
     stepMax.textContent = cachedData.n_steps;
     btnPrev.disabled  = false;
     btnNext.disabled  = false;
+    reinitBtn.disabled = false;
 
     document.getElementById('plain-time').textContent = `${cachedData.plain_time}s`;
     document.getElementById('safe-time').textContent  = `${cachedData.safe_time}s`;
@@ -884,10 +964,11 @@ function debouncedRecomputeUpdate() {
 /* ── Loading ──────────────────────────────────────────────────────── */
 function setLoading(on) {
   overlay.classList.toggle('active', on);
-  runBtn.disabled   = on;
-  scrubber.disabled = on;
-  btnPrev.disabled  = on;
-  btnNext.disabled  = on;
+  runBtn.disabled    = on;
+  reinitBtn.disabled = on || !cachedData;
+  scrubber.disabled  = on;
+  btnPrev.disabled   = on;
+  btnNext.disabled   = on;
 }
 
 /* ════════════════════════════════════════════════════════════════════

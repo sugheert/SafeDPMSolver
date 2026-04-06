@@ -21,7 +21,16 @@
   <label for="n-steps-input">Steps</label>
   <input id="n-steps-input" type="number" value="20" min="5" max="200" step="1" />
 
+  <label>Start</label>
+  <input id="start-x-input" type="number" value="-0.8" step="0.05" style="width:4.5em" title="Start X" />
+  <input id="start-y-input" type="number" value="-0.8" step="0.05" style="width:4.5em" title="Start Y" />
+
+  <label>Goal</label>
+  <input id="goal-x-input" type="number" value="0.8" step="0.05" style="width:4.5em" title="Goal X" />
+  <input id="goal-y-input" type="number" value="0.8" step="0.05" style="width:4.5em" title="Goal Y" />
+
   <button id="run-btn">&#9654;&nbsp;Run</button>
+  <button id="reinit-btn" disabled title="Re-run the full diffusion process starting from the current after-control output">&#8635;&nbsp;Re-run&nbsp;from&nbsp;Output</button>
   <button id="batch-btn">&#9654;&#9654;&nbsp;Batch&nbsp;100</button>
 
   <div class="scrubber-group">
