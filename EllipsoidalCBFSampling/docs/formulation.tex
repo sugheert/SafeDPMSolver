@@ -1,0 +1,667 @@
+\documentclass{article}
+\usepackage{graphicx} % Required for inserting images
+\usepackage[margin=0.75in]{geometry}
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+
+\newcommand{\softplus}{\operatorname{softplus}}
+\newcommand{\softmin}{\operatorname{softmin}}
+\newcommand{\sigmoid}{\sigma}
+
+
+\title{\[\dot{H} Derivation\]}
+\author{Sugheerth Sreedharan }
+\date{October 4, 2025}
+
+\begin{document}
+
+\maketitle
+
+\section{The CBF of $X_t$}
+
+\subsection*{Notation}
+
+Let $X_t = [w_1, \dots, w_T]^\top \in \mathbb{R}^{2T}$, with each waypoint $w_i = (x_i, y_i)$.
+Define the semi-axes of the degree-4 hyperellipsoid obstacle $j$ as $a_j$ and $b_j$. The signed pseudo-distance from waypoint $i$ to obstacle $j$ is defined as:
+
+\begin{equation}
+    d_{ij} = \sqrt[4]{\left(\frac{p_{xj} - x_i}{a_j}\right)^4 + \left(\frac{p_{yj} - y_i}{b_j}\right)^4 + \varepsilon\,} - 1
+\end{equation}
+
+where the obstacle boundary is evaluated at $1$, and $\varepsilon > 0$ is a regularisation constant that keeps the expression differentiable even when $w_i = p_j$.
+Note that $d_{ij} > 0$ means waypoint $i$ is safe from obstacle $j$, and $d_{ij} < 0$ means penetration.
+
+For notational convenience, define:
+\begin{equation}
+    \rho_{ij} \;=\; \sqrt[4]{\left(\frac{p_{xj} - x_i}{a_j}\right)^4 + \left(\frac{p_{yj} - y_i}{b_j}\right)^4 + \varepsilon\,}
+\end{equation}
+so that $d_{ij} = \rho_{ij} - 1$.
+
+To focus gradient contributions on violated constraints ($d_{ij} < 0$)
+while suppressing safe ones ($d_{ij} > 0$), we apply a smooth asymmetric
+transformation via the softplus function:
+
+\begin{equation}
+    \tilde{d}_{ij}
+    = -c \cdot \softplus\!\left(-\frac{d_{ij}}{c}\right) + \log(2)
+    = -c \cdot \log\!\left(1 + e^{-d_{ij}/c}\right) + \log(2)
+\end{equation}
+
+where $c > 0$ is a sharpness parameter. This transformation satisfies:
+\begin{itemize}
+    \item $d_{ij} \gg 0 \;\Rightarrow\; \tilde{d}_{ij} \approx \log(2)$
+          \quad (safe obstacles contribute nothing)
+    \item $d_{ij} \ll 0 \;\Rightarrow\; \tilde{d}_{ij} \approx d_{ij}$
+          \quad (violated obstacles pass through unchanged)
+    \item $\tilde{d}_{ij} \leq 0$ for all $d_{ij}$, with smooth transition at zero
+\end{itemize}
+
+The waypoint-level CBF uses a softmin over the transformed distances
+with temperature $k_1$:
+
+\begin{equation}
+    h(w_i)
+    = \softmin_j^{k_1}(\tilde{d}_{ij})
+    = -k_1 \log \frac{1}{N}\sum_{j=1}^{N} e^{-\tilde{d}_{ij}/k_1}
+\end{equation}
+
+The trajectory-level CBF uses a softmin over waypoints with temperature $k_2$:
+
+\begin{equation}
+    h(X_t)
+    = \softmin_i^{k_2}(h(w_i))
+    = -k_2 \log \frac{1}{T}\sum_{i=1}^{T} e^{-h(w_i)/k_2}
+\end{equation}
+
+\subsection*{Step 1 --- Outer Softmin Weights (over waypoints, temperature $k_2$)}
+
+To ensure numerical stability when evaluating the exponentials, we factor out the minimum waypoint CBF value. Let $h_{\min} = \min_{i'} h(w_{i'})$.
+
+The stabilized trajectory-level CBF is:
+
+\begin{equation}
+    h(X_t)
+    = h_{\min} - k_2 \log \left( \frac{1}{T}\sum_{i=1}^{T} e^{-(h(w_i) - h_{\min})/k_2} \right)
+\end{equation}
+
+Define the stabilized softmax weights over waypoints:
+
+\begin{equation}
+    \sigma_i
+    = \frac{e^{-(h(w_i) - h_{\min})/k_2}}{\displaystyle\sum_{i'=1}^{T} e^{-(h(w_{i'}) - h_{\min})/k_2}},
+    \qquad \sum_{i=1}^{T} \sigma_i = 1
+\end{equation}
+
+By the chain rule, the partial derivative of $h(X_t)$ with respect to
+waypoint $w_i$ remains algebraically identical, now utilizing the stabilized weights:
+
+\begin{equation}
+    \frac{\partial h(X_t)}{\partial w_i}
+    = \sigma_i \cdot \nabla_{w_i} h(w_i)
+\end{equation}
+
+\subsection*{Step 2 --- Inner Softmin Weights (over obstacles, temperature $k_1$)}
+
+Similarly, we stabilize the waypoint-level CBF against the most deeply penetrated obstacle. Let $\tilde{d}_{\min, i} = \min_{j'} \tilde{d}_{ij'}$.
+
+The stabilized waypoint-level CBF is:
+
+\begin{equation}
+    h(w_i)
+    = \tilde{d}_{\min, i} - k_1 \log \left( \frac{1}{N}\sum_{j=1}^{N} e^{-(\tilde{d}_{ij} - \tilde{d}_{\min, i})/k_1} \right)
+\end{equation}
+
+Define the stabilized softmax weights over obstacles for waypoint $i$:
+
+\begin{equation}
+    \alpha_{ij}
+    = \frac{e^{-(\tilde{d}_{ij} - \tilde{d}_{\min, i})/k_1}}{\displaystyle\sum_{j'=1}^{N}
+      e^{-(\tilde{d}_{ij'} - \tilde{d}_{\min, i})/k_1}},
+    \qquad \sum_{j=1}^{N} \alpha_{ij} = 1
+\end{equation}
+
+Since $\tilde{d}_{ij} \leq \log(2)$ for all $i,j$, and the shift guarantees the largest exponent is exactly $0$, all exponential terms are bounded in $(0, 1]$, preventing numerical overflow.
+
+Differentiating $h(w_i)$ via the chain rule yields the same weighted sum, as the constant shift $\tilde{d}_{\min, i}$ vanishes during differentiation:
+
+\begin{equation}
+    \nabla_{w_i} h(w_i)
+    = \sum_{j=1}^{N} \alpha_{ij} \cdot \nabla_{w_i} \tilde{d}_{ij}
+\end{equation}
+
+To compute $\nabla_{w_i} \tilde{d}_{ij}$, we apply the chain rule through
+the softplus. Since the derivative of $\softplus$ is the sigmoid
+$\sigmoid(\cdot) = (1 + e^{-(\cdot)})^{-1}$, and the $+\log(2)$ offset is constant:
+
+\begin{equation}
+    \frac{\partial \tilde{d}_{ij}}{\partial d_{ij}}
+    = \sigmoid\!\left(-\frac{d_{ij}}{c}\right)
+    = \frac{1}{1 + e^{\,d_{ij}/c}}
+\end{equation}
+
+Now we find the gradient of the raw distance with respect to the waypoint. Since
+$d_{ij} = \rho_{ij} - 1$, we need $\nabla_{w_i} \rho_{ij}$. Applying the chain rule to the 4th root:
+
+\begin{equation}
+    \nabla_{w_i}\, \rho_{ij}
+    = \frac{1}{4} \left( \left(\frac{p_{xj} - x_i}{a_j}\right)^4 + \left(\frac{p_{yj} - y_i}{b_j}\right)^4 + \varepsilon\, \right)^{-3/4} \cdot \nabla_{w_i} \left[ \left(\frac{p_{xj} - x_i}{a_j}\right)^4 + \left(\frac{p_{yj} - y_i}{b_j}\right)^4 \right]
+\end{equation}
+
+Notice the first term simplifies to $\frac{1}{4\rho_{ij}^3}$. Differentiating the inner components with respect to $x_i$ and $y_i$ respectively:
+
+\begin{equation}
+    \frac{\partial}{\partial x_i} \left(\frac{p_{xj} - x_i}{a_j}\right)^4
+    = 4 \left(\frac{p_{xj} - x_i}{a_j}\right)^3 \left(-\frac{1}{a_j}\right)
+    = -\frac{4(p_{xj} - x_i)^3}{a_j^4}
+\end{equation}
+
+The factor of $4$ perfectly cancels the $1/4$ from the root derivative. Therefore:
+
+\begin{equation}
+    \frac{\partial d_{ij}}{\partial w_i}
+    = -\frac{1}{\rho_{ij}^3} \begin{pmatrix} \frac{(p_{xj} - x_i)^3}{a_j^4} \\ \frac{(p_{yj} - y_i)^3}{b_j^4} \end{pmatrix}
+\end{equation}
+
+\textbf{Note:} The 4th root introduces a normalisation by $\rho_{ij}^3$. The regulariser $\varepsilon > 0$ ensures $\rho_{ij} > 0$ everywhere, so this gradient is always well-defined, even at the exact center of the obstacle.
+
+Combining via the chain rule:
+
+\begin{equation}
+    \nabla_{w_i} \tilde{d}_{ij}
+    = \frac{\partial \tilde{d}_{ij}}{\partial d_{ij}} \cdot \frac{\partial d_{ij}}{\partial w_i}
+    = -\frac{1}{\rho_{ij}^3}\,\sigmoid\!\left(-\frac{d_{ij}}{c}\right) \begin{pmatrix} \frac{(p_{xj} - x_i)^3}{a_j^4} \\ \frac{(p_{yj} - y_i)^3}{b_j^4} \end{pmatrix}
+\end{equation}
+
+Substituting back:
+
+\begin{equation}
+\boxed{
+    \nabla_{w_i} h(w_i)
+    = -\sum_{j=1}^{N} \frac{\alpha_{ij}}{\rho_{ij}^3}\,
+      \sigmoid\!\left(-\frac{d_{ij}}{c}\right) \begin{pmatrix} \frac{(p_{xj} - x_i)^3}{a_j^4} \\ \frac{(p_{yj} - y_i)^3}{b_j^4} \end{pmatrix}
+}
+\end{equation}
+
+The sigmoid factor $\sigmoid(-d_{ij}/c)$ acts as a \textbf{soft gate}:
+\begin{itemize}
+    \item $d_{ij} \ll 0$: $\sigmoid(-d_{ij}/c) \to 1$
+          \quad (violated obstacles pass full gradient)
+    \item $d_{ij} \gg 0$: $\sigmoid(-d_{ij}/c) \to 0$
+          \quad (safe obstacles contribute no gradient)
+    \item $d_{ij} = 0$:  $\sigmoid(0) = 0.5$
+          \quad (smooth transition at the safety boundary)
+\end{itemize}
+
+The factor $1/\rho_{ij}^3$ \textbf{normalises} the higher-order displacement terms, making the gradient scale appropriately based on the specific shape and size encoded by $a_j$ and $b_j$.
+
+\subsection*{Step 3 --- Full Gradient}
+
+Since the waypoints $\{w_i\}$ are independent components of $X_t$,
+the full gradient is assembled blockwise, utilizing the numerically
+stabilized weights $\sigma_i$ and $\alpha_{ij}$ derived above:
+
+\begin{equation}
+\boxed{
+    \nabla_{X_t} h(X_t)
+    = \left\{
+        -\sigma_i \sum_{j=1}^{N} \frac{\alpha_{ij}}{\rho_{ij}^3}\,
+        \sigmoid\!\left(-\frac{d_{ij}}{c}\right)
+        \begin{pmatrix} \frac{(p_{xj} - x_i)^3}{a_j^4} \\ \frac{(p_{yj} - y_i)^3}{b_j^4} \end{pmatrix}
+      \right\}_{i=1}^{T}
+}
+\end{equation}
+
+where $\rho_{ij} = \sqrt[4]{\left(\frac{p_{xj} - x_i}{a_j}\right)^4 + \left(\frac{p_{yj} - y_i}{b_j}\right)^4 + \varepsilon\,}$.
+
+This is a vector in $\mathbb{R}^{T \times 2}$, where the block for waypoint $w_i$
+is a triply-weighted sum of normalised degree-4 displacement vectors
+from $w_i$ to each obstacle center $p_j$.
+
+\subsection*{Summary of Weights}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Symbol} & \textbf{Parameter} & \textbf{Role} \\
+\midrule
+$\sigma_i$ & $k_2$ & Importance of waypoint $i$ to trajectory-level CBF \\
+$\alpha_{ij}$ & $k_1$ & Importance of obstacle $j$ to waypoint-level CBF \\
+$\sigmoid(-d_{ij}/c)$ & $c$ & Gate suppressing safe obstacles from gradient \\
+$1/\rho_{ij}^3$ & $\varepsilon, a_j, b_j$ & Normalises the hyperellipsoid displacement; $\varepsilon$ prevents division by zero \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Effect of parameters.}
+\begin{itemize}
+    \item $k_1 \to 0$: $\alpha_{ij}$ concentrates on the single most-violated obstacle.
+    \item $k_2 \to 0$: $\sigma_i$ concentrates on the single most-dangerous waypoint.
+    \item $c \to 0$: sigmoid gate becomes a hard threshold ---
+          only $d_{ij} < 0$ obstacles contribute any gradient.
+    \item $c \to \infty$: sigmoid gate $\to 0.5$ everywhere ---
+          recovers the unmodified softmin gradient (all obstacles contribute equally).
+    \item $\varepsilon \to 0$: Recovers the exact hyperellipsoid boundary gradient, but becomes singular at the exact center $w_i = p_j$.
+    \item $\varepsilon \to \infty$: $1/\rho_{ij}^3 \to 0$, suppressing all gradient contributions.
+\end{itemize}
+ 
+% \subsection*{What Changed from the Original}
+ 
+% The modification is in the definition of $d_{ij}$:
+ 
+% \begin{center}
+% \begin{tabular}{lll}
+% \toprule
+%  & \textbf{Definition} & \textbf{Gradient w.r.t.\ $w_i$} \\
+% \midrule
+% \textbf{Original} & $d_{ij} = \|w_i - p_j\|_2^2 - r^2 + \gamma\delta$
+%     & $2(w_i - p_j)$ \\[6pt]
+% \textbf{New} & $d_{ij} = \sqrt{\|w_i - p_j\|_2^2 + \varepsilon\,} - r$
+%     & $\dfrac{w_i - p_j}{\rho_{ij}}$ \\
+% \bottomrule
+% \end{tabular}
+% \end{center}
+ 
+% \medskip
+ 
+% Unlike the previous version where $d_{ij}$ was quadratic in $w_i$ (yielding
+% a linear gradient), the new $d_{ij}$ involves a square root, which introduces
+% a \emph{normalisation factor} $1/\rho_{ij}$. Concretely:
+ 
+% \begin{enumerate}
+%     \item The factor of $2$ in the original gradient is replaced by $1/\rho_{ij}$.
+%     \item Distant waypoints, which have large $\rho_{ij}$, produce
+%           \emph{smaller} gradient magnitudes per unit displacement.
+%           In the original formulation, distant waypoints produced
+%           \emph{larger} gradients (due to the factor of $2\|w_i - p_j\|$).
+%     \item The regulariser $\varepsilon > 0$ ensures the gradient is bounded
+%           everywhere, including when $w_i$ coincides with $p_j$.
+% \end{enumerate}
+
+
+\section{Generative Sampling with CBF and Diffusion PF-ODE}
+
+\begin{align}
+\frac{dx_t}{dt}
+&= f(x_t,t) + \frac{g^2(t)}{2}\, s_\theta(x_t,t)
+\end{align}
+
+\subsection{Control Affine Equation}
+
+\begin{align}
+\dot{x} = F(x,t) + G(x,t)u
+\end{align}
+where $F(x,t)$ is the drift and $G(x,t)$ is the control term.
+The PF-ODE can be represented as 
+
+\begin{align}
+\frac{dx_t}{dt}
+&= f(x_t,t) + \frac{g^2(t)}{2}, s_\theta(x_t,t) + I\cdot u
+\\
+&\text{ with }G(x) = I \text{ and } u=\vec{0} \text{ and } F(x)
+= f(x,t) + \frac{g^2(t)}{2} s_\theta(x,t)\\
+&\text{ with }G(x) = I \text{ and } u=\vec{0} \text{ and } F(x)
+= f(x,t) + \frac{g^2(t)}{2\sigma_t} \epsilon_\theta(x,t)
+\end{align}
+So, for safe operation, QP objective and constraints can be given by 
+\begin{align}
+    &\text{minimize } \frac{1}{2}u_d^TQu_d + c^Tu_d + \frac{1}{2}\gamma\mu^2
+    \\&\text{S.T. }
+    \\&-L_fh(x) -Lgh(x)\cdot u -\alpha(h(x)) -\mu h(x)\le 0
+\end{align}
+where
+\begin{align}
+Q = I, \qquad c = \vec{0}
+\end{align}
+
+\subsection{Optimal Control formulation using closed form solution of QP with CBF constraint:}
+
+\begin{align}
+u^*(x) =
+\begin{cases}
+-\dfrac{\omega(x)}{d(x)} \nabla h(x), & \omega(x) < 0 \\
+0, & \omega(x) \ge 0
+\end{cases}
+\end{align}
+
+\begin{align}
+u^*(x)
+=
+- Q^{-1}
+\left(
+c - L_g h(x)^T \lambda(x)
+\right)
+\end{align}
+
+\begin{align}
+\lambda(x) =
+\begin{cases}
+\dfrac{-\omega(x)}{d(x)}, & x \in \Omega \\
+0, & x \notin \Omega
+\end{cases}
+\end{align}
+
+\begin{align}
+\omega(x) =
+L_f h(x)
+-
+L_g h(x) Q^{-1} c
++
+\alpha(h(x))
+\end{align}
+
+\begin{align}
+d(x)
+=
+L_g h(x) Q^{-1} L_g h(x)^T
++
+\gamma^{-1} h(x)^2
+\end{align}
+
+\subsection{Substituting assumptions:}
+\begin{align}
+L_g h(x) = \nabla_x h(x) \cdot I
+\end{align}
+
+\begin{align}
+u^*(x)
+=
+\lambda(x)\,\nabla_x h(x)
+\end{align}
+
+\begin{align}
+\lambda(x)
+=
+\frac{-\omega(x)}
+{\|\nabla_x h(x)\|_2^2 + \gamma^{-1}h(x)^2}
+\end{align}
+
+\subsection{Substituting VE ODE Drift:}
+
+\begin{align}
+L_f h(x)
+=
+\nabla_x h(x)^T
+\left(
+\frac{d \log \alpha_t}{dt} x
+-
+2\sigma_t^2 \frac{d\lambda_t}{dt}\epsilon_\theta(x,t)
+\right)
+\end{align}
+
+\begin{align}
+\omega(x)
+=
+\nabla_x h(x)^T
+\left(
+\frac{d \log \alpha_t}{dt} x
+-
+2\sigma_t^2 \frac{d\lambda_t}{dt}\epsilon_\theta(x,t)
+\right)
++
+\alpha(h(x))
+\end{align}
+
+\subsection{Final Safe Control Formulation}
+
+\begin{align}
+u^*(x)
+=
+-
+\frac{
+\nabla_x h(x)^T
+\left(
+\frac{d \log \alpha_t}{dt} x
+-
+2\sigma_t^2 \frac{d\lambda_t}{dt}\epsilon_\theta(x,t)
+\right)
++
+\alpha(h(x))
+}
+{
+\|\nabla_x h(x)\|_2^2
++
+\gamma^{-1} h(x)^2
+}
+\;
+\nabla_x h(x)
+\end{align}
+
+Integrating
+\begin{align}
+\dot{x}
+=
+f(x,t)
++
+u^*(x)
+\end{align}
+
+using an exponential integrator of the form 
+\begin{align}
+x_t
+&=
+e^{\int_s^t f(r)\,dr}\,x_s
++
+\int_s^t
+e^{\int_\tau^t f(r)\,dr}
+\left[
+\frac{g^2(\tau)}{2\sigma_\tau}\epsilon_\theta(x_\tau,\tau)
++
+u^*(x_\tau,\tau)
+\right] d\tau
+\end{align}
+where,
+\begin{align}
+u^*(x_\tau,\tau)
+&=
+\begin{cases}
+-\dfrac{
+\omega(x_\tau,\tau)
+}{
+\|\nabla h(x_\tau)\|_2^2+\gamma^{-1}h(x_\tau)^2
+}\nabla h(x_\tau),
+& \omega(x_\tau,\tau)<0,\\[1.2ex]
+0, & \omega(x_\tau,\tau)\ge 0,
+\end{cases}
+\\[1ex]
+\omega(x_\tau,\tau)
+&=
+\nabla h(x_\tau)^\top
+\left(
+f(\tau)x_\tau+\dfrac{g^2(\tau)}{2\sigma_\tau}\epsilon_\theta(x_\tau,\tau)
+\right)
++\alpha(h(x_\tau)).
+\end{align}
+the sampling equation can be rewritten as 
+\begin{align}
+x_t
+&=
+e^{\int_s^t f(r)\,dr}\,x_s
++
+\int_s^t
+e^{\int_\tau^t f(r)\,dr}
+\left[
+\frac{g^2(\tau)}{2\sigma_\tau}\epsilon_\theta(x_\tau,\tau)
+-
+\frac{
+\min\!\left(
+0,\,
+\nabla h(x_\tau)^\top
+\left(
+f(\tau)x_\tau+\frac{g^2(\tau)}{2\sigma_\tau}\epsilon_\theta(x_\tau,\tau)
+\right)
++\alpha(h(x_\tau))
+\right)
+}{
+\|\nabla h(x_\tau)\|_2^2+\gamma^{-1}h(x_\tau)^2
+}
+\nabla h(x_\tau)
+\right]d\tau.
+\end{align}
+
+\subsection{Controlled Probability Flow ODE}
+
+The generative ODE with CBF safety control is:
+\begin{align}
+\dot{x}_t = f(t)x_t + \frac{g^2(t)}{2\sigma_t}\epsilon_\theta(x_t,t) + u^*(x_t,t)
+\end{align}
+
+Define the log-SNR $\lambda_t := \log(\alpha_t/\sigma_t)$. Multiplying through by the integrating factor $e^{-\int f(r)dr} = \alpha_t^{-1}$ and applying variation of constants yields the exact solution:
+\begin{align}
+x_t = \frac{\alpha_t}{\alpha_s}x_s + \alpha_t\int_s^t \frac{1}{\alpha_\tau}\left[\frac{g^2(\tau)}{2\sigma_\tau}\epsilon_\theta(x_\tau,\tau)\right]d\tau + \alpha_t\int_s^t \frac{1}{\alpha_\tau}\left[ u^*(x_\tau,\tau)\right]d\tau
+\end{align}
+
+Changing variable $\tau \to \lambda$ via $d\tau = d\lambda/\dot{\lambda}_\tau$ and using the standard DPM-Solver identity $\frac{g^2(\tau)}{2\sigma_\tau\alpha_\tau\dot{\lambda}_\tau} = -e^{-\lambda}$ yields the exact solution in $\lambda$-space for the score term, keeping the time-integral for the control term:
+\begin{align}
+x_t = \frac{\alpha_t}{\alpha_s}x_s - \alpha_t\int_{\lambda_s}^{\lambda_t} e^{-\lambda}\epsilon_\theta(\hat{x}_\lambda,\lambda)d\lambda + \alpha_t\int_{s}^{t} \frac{u^*(x_\tau,\tau)}{\alpha_\tau}d\tau
+\end{align}
+
+\subsection{Expansion of the Optimal Control $u^*$}
+
+For $g(x) = I$, $Q = I$, $c = 0$, the optimal control to satisfy the CBF is given by:
+\begin{align}
+u^*(x,\tau) = -\frac{\min(0,\omega(x,\tau))}{\|\nabla h(x)\|_2^2 + \gamma^{-1}h(x)^2}\nabla h(x)
+\end{align}
+where the boundary condition $\omega$ is defined as:
+\begin{align}
+\omega(x,\tau) = \nabla h(x)^\top\!\left(f(\tau)x + \frac{g^2(\tau)}{2\sigma_\tau}\epsilon_\theta(x,\tau)\right) + \alpha(h(x))
+\end{align}
+
+To evaluate this within a first-order solver, we evaluate the constraint activation strictly at the start of the timestep $s$. Let $\omega_s = \omega(x_s, s)$ and $D_s = \|\nabla h_s\|_2^2 + \gamma^{-1}h_s^2$. 
+
+If $\omega_s < 0$, the constraint is active. Expanding the $u^*$ term by substituting $\omega$ yields:
+\begin{align}
+u^*(x_\tau,\tau) = -\frac{\nabla h_s}{D_s}\left[ \nabla h_s^\top f(\tau)x_\tau + \nabla h_s^\top \frac{g^2(\tau)}{2\sigma_\tau}\epsilon_\theta(x_\tau,\tau) + \alpha(h_s) \right]
+\end{align}
+
+\subsection{Integrate 1st Part as DPM-Solver}
+
+Denote $h_i := \lambda_{t_i} - \lambda_{t_{i-1}} > 0$. For a first-order step (DPM-Solver-1), we approximate the state $x$ and the network prediction $\epsilon_\theta$ as constant over the interval $[\lambda_s, \lambda_t]$ (evaluated at $s = t_{i-1}$).
+
+\paragraph{Score integral (analytic):}
+\begin{align}
+-\alpha_t\int_{\lambda_s}^{\lambda_t} e^{-\lambda}\epsilon_\theta(x_s,s)d\lambda = -\alpha_t\epsilon_\theta(x_s,s)\left[-e^{-\lambda}\right]_{\lambda_s}^{\lambda_t} = -\sigma_t(e^{h_i}-1)\epsilon_\theta(x_s,s)
+\end{align}
+
+\subsection{Integrate 2nd Part (Expanded CBF Control)}
+
+The safe control part of the integral is intractable because the the control depends on the starting state, which itself is evolving over time. Secondly, the control is non-linear because of the min function, which switches between 0 and a valuse based on the $\omega$-function evaluation with state that is evolving over time. 
+
+Therefore, we use the same Taylor Series approximation to freeze the state at time s and split the function into two:
+
+\begin{align}
+    \alpha_t\int_{s}^{t} \frac{u^*(x_s,\tau)}{\alpha_\tau}d\tau = 
+    \begin{cases}
+    0 & \text{if }\omega \ge 0\\
+    -\frac{\nabla h_s}{D_s} \left[ (\nabla h_s^\top x_s) \alpha_t\int_s^t \frac{f(\tau)}{\alpha_\tau}d\tau + (\nabla h_s^\top \epsilon_{\theta,s}) \alpha_t\int_s^t \frac{g^2(\tau)}{2\sigma_\tau\alpha_\tau}d\tau + \alpha(h_s) \alpha_t\int_s^t \frac{1}{\alpha_\tau}d\tau \right] & \text{if } \omega < 0
+    \end{cases}
+\end{align}
+
+ We then integrate the second case. Because we assume $x_\tau \approx x_s$ over the microscopic timestep, the spatial terms ($\nabla h_s$, $x_s$, $\epsilon_{\theta,s}$, $\alpha(h_s)$) are treated as constants and pulled out of the time integrals:
+
+\begin{align}
+\alpha_t\int_{s}^{t} \frac{u^*(x_s,\tau)}{\alpha_\tau}d\tau = -\frac{\nabla h_s}{D_s} \left[ (\nabla h_s^\top x_s) \alpha_t\int_s^t \frac{f(\tau)}{\alpha_\tau}d\tau + (\nabla h_s^\top \epsilon_{\theta,s}) \alpha_t\int_s^t \frac{g^2(\tau)}{2\sigma_\tau\alpha_\tau}d\tau + \alpha(h_s) \alpha_t\int_s^t \frac{1}{\alpha_\tau}d\tau \right]
+\end{align}
+
+We analytically evaluate these three schedule integrals:
+\begin{enumerate}
+    \item \textbf{Drift Integral:} Using $f(\tau) = \frac{\dot{\alpha}_\tau}{\alpha_\tau}$, we get $\alpha_t\int_s^t \frac{\dot{\alpha}_\tau}{\alpha_\tau^2}d\tau = \alpha_t\left[-\frac{1}{\alpha_\tau}\right]_s^t = \left(\frac{\alpha_t}{\alpha_s} - 1\right)$
+    \item \textbf{Diffusion Integral:} Using the same identity as the score integral, this evaluates to $-\sigma_t(e^{h_i}-1)$
+    \item \textbf{Class-K Integral:} Using a constant approximation over the time interval, $\alpha_t\int_s^t \frac{1}{\alpha_\tau}d\tau \approx \frac{\alpha_t}{\alpha_s}(t-s)$
+\end{enumerate}
+
+Substituting these back gives the exact-integrated control term for $\omega_s < 0$:
+\begin{align}
+\alpha_t\int_{s}^{t} \frac{u^*(x_s,\tau)}{\alpha_\tau}d\tau = -\frac{\nabla h_s}{D_s}\left[ \left(\frac{\alpha_t}{\alpha_s} - 1\right)(\nabla h_s^\top x_s) - \sigma_t(e^{h_i}-1)(\nabla h_s^\top \epsilon_{\theta,s}) + \frac{\alpha_t}{\alpha_s}(t-s)\alpha(h_s) \right]
+\end{align}
+
+\subsection{Combine the Integrals Together}
+
+Combining the standard score step with the piecewise CBF update ensures we only apply the control when $\omega_s < 0$:
+
+\begin{align}
+x_t = 
+\begin{cases} 
+\frac{\alpha_t}{\alpha_s}x_s - \sigma_t(e^{h_i}-1)\epsilon_{\theta,s} & \text{if } \omega_s \ge 0 \\
+\frac{\alpha_t}{\alpha_s}x_s - \sigma_t(e^{h_i}-1)\epsilon_{\theta,s} - \frac{\nabla h_s}{D_s}\left[ \left(\frac{\alpha_t}{\alpha_s} - 1\right)(\nabla h_s^\top x_s) - \sigma_t(e^{h_i}-1)(\nabla h_s^\top \epsilon_{\theta,s}) + \frac{\alpha_t}{\alpha_s}(t-s)\alpha(h_s) \right] & \text{if } \omega_s < 0 
+\end{cases}
+\end{align}
+
+\subsection{The Final Step (Variance Exploding Assumption)}
+
+For the VE case, the schedule simplifies drastically: $\alpha_t=1$, $f(t) = 0$, and $\sigma_t(e^{h_i}-1) = (\sigma_s - \sigma_t)$. 
+Applying these identities, the drift integral $\left(\frac{\alpha_t}{\alpha_s} - 1\right)$ goes to zero, and the scale $\frac{\alpha_t}{\alpha_s}$ becomes 1. 
+
+Evaluating the step from $s = t_{i-1}$ to $t = t_i$, the final exact-integrated update for the active constraint region ($\omega_{t_{i-1}} < 0$) is:
+
+\begin{align}
+\boxed{
+x_{t_{i}} = x_{t_{i-1}} - (\sigma_{t_{i-1}}-\sigma_{t_i})\epsilon_\theta(x_{t_{i-1}}, t_{i-1}) - \frac{\nabla h_{t_{i-1}}}{\|\nabla h_{t_{i-1}}\|_2^2 + \gamma^{-1}h_{t_{i-1}}^2} \left[ -(\sigma_{t_{i-1}}-\sigma_{t_i})(\nabla h_{t_{i-1}}^\top \epsilon_{\theta}(x_{t_{i-1}}, t_{i-1})) + (t_i-t_{i-1})\alpha(h_{t_{i-1}}) \right]
+}
+\end{align}
+\subsection{Properties}
+
+\begin{itemize}
+\item \textbf{Generic:} Valid for any VE/VP schedule — 
+      only $\alpha_t$, $\sigma_t$, $\dot\lambda_t$ need to be specified.
+
+\item \textbf{Recovery:} When $\omega_{t_{i-1}} \geq 0$, 
+      $\min(0,\omega) = 0$ and the update reduces exactly to 
+      standard DPM-Solver-1:
+      \begin{align}
+          x_{t_{i-1}\to t_i} 
+          = \frac{\alpha_{t_i}}{\alpha_{t_{i-1}}}\,x_{t_{i-1}}
+          - \sigma_{t_i}(e^{h_i}-1)\,\epsilon_\theta(x_{t_{i-1}},t_{i-1})
+      \end{align}
+
+\item \textbf{Consistent order:} Both $\epsilon_\theta$ and $u^*$ 
+      are held constant at $x_{t_{i-1}}$, giving uniform 
+      $\mathcal{O}(h_i^2)$ truncation error.
+
+\item \textbf{No extra network calls:} The CBF correction 
+      reuses $\epsilon_\theta(x_{t_{i-1}}, t_{i-1})$ 
+      already computed for the score step.
+
+\item \textbf{Schedule coefficient:}
+      $\dfrac{\alpha_{t_i}\,h_i}{\alpha_{t_{i-1}}\,\dot\lambda_{t_{i-1}}}$
+      rescales the CBF correction to match the log-SNR timescale, 
+      consistently with the $(e^{h_i}-1)$ factor in the score term.
+\end{itemize}
+
+
+\section{AG}
+
+σ(t) is a geometric schedule over discrete levels i = 0 … N:
+
+$$\sigma_i = \sigma_{\min} \left(\frac{\sigma_{\max}}{\sigma_{\min}}\right)^{i/N}$$
+
+Default: σ_min = 0.01, σ_max = 10.0, N = 1000.
+
+The time derivative is:
+
+$$\dot{\sigma}(t) = \sigma(t) \ln!\left(\frac{\sigma_{\max}}{\sigma_{\min}}\right)$$
+
+Training Loss (Denoising Score Matching)
+Sample $x_0 \sim p_{\text{data}}$, $\varepsilon \sim \mathcal{N}(0, I)$, pick random level $i$:
+
+$$\mathcal{L} = \mathbb{E}\bigl[|\varepsilon_\theta(x_0 + \sigma_i \varepsilon,\ \sigma_i) - \varepsilon|^2\bigr]$$
+
+The network predicts the noise ε (not the score directly; score = −ε/σ).
+
+DPM-Solver-1 + CBF Update (from image)
+One denoising step $t_{i-1} \to t_i$ (σ decreasing):
+
+$$ x_{t_{i-1} \to t_i} = x_{t_{i-1}}
+(\sigma_{t_{i-1}} - \sigma_{t_i}),\varepsilon_\theta(x_{t_{i-1}}, t_{i-1})
+\frac{h_i ,\sigma_{t_{i-1}}}{\dot\sigma_{t_{i-1}}} \cdot \frac{\min(0,\omega_{t_{i-1}}^{\text{VE}})} {|\nabla h_{t_{i-1}}|2^2 + \gamma^{-1} h{t_{i-1}}^2} ,\nabla h_{t_{i-1}} $$
+where
+
+$$ h_i = \log!\left(\frac{\sigma_{t_{i-1}}}{\sigma_{t_i}}\right), \qquad \omega_s^{\text{VE}} = \dot\sigma_s,\nabla h_s^\top \varepsilon_\theta(x_s, s) + \alpha(h_s) $$
+
+$h(x)$ — scalar CBF (positive in safe/free space, negative in walls). We use a differentiable signed-distance-to-walls function built from the maze grid.
+$\alpha(h)$ — class-K function; we use the linear $\alpha(h) = \alpha_0 \cdot h$ with $\alpha_0 = 1.0$.
+$\gamma$ — regularisation parameter (default 1.0).
+The CBF term is zero whenever $\omega^{\text{VE}} \ge 0$ (constraint already satisfied).
+
+\end{document}
