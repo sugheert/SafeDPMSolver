@@ -1,0 +1,67 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{enumitem}
+
+\title{Trajectory Dataset Generation Workflow Report: Hyper-Ellipsoidal Motion Planning via Informed RRT* and GPMP2}
+\author{MPD Auto-Generator Documentation}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+This report outlines the end-to-end framework constructed for generating automated, collision-free diffusion trajectory datasets structured under the D4RL Minari standard format. The implementation bridges \textit{torch\_robotics} physical modelling constraints with natively embedded analytic planning architectures.
+
+\section{Environment Geometric Modeling}
+The layouts heavily map predefined grid-matrix configurations onto continuous structural manifolds, explicitly defining discrete obstacles dynamically inside the metric boundary domains.
+\begin{itemize}[leftmargin=*]
+    \item \textbf{UMaze}: Bounded structurally across $x,y \in [-2.5, 2.5]$, housing uniformly placed continuous blocks acting as outer boundary walls and an inner maze barrier. The space generates $1-2$ randomized hyper-ellipsoids with base radii sampled logarithmically within $[0.3, 0.6]$.
+    \item \textbf{LargeMaze}: Adhering functionally exclusively to the D4RL $9 \times 12$ standard structure bounded mathematically tightly inside $x \in [-6.0, 6.0]$ and $y \in [-4.5, 4.5]$. The space dynamically drops $1-5$ randomized hyper-ellipsoids across open routes uniformly picking dimensions $r \in [0.4, 1.0]$.
+\end{itemize}
+
+\subsection{Degree-4 Hyper-Ellipsoid Constraints}
+Standard primitives were superseded with specifically engineered \textit{Degree-4 Super-ellipsoids (Hyper-Ellipsoids)}. In order to properly condition the continuous spaces enabling strict collision boundary gradients for the secondary optimizer, we utilized $L_4$ tensor-fields. The Approximate Signed Distance Function (SDF) of the surface scales mathematically:
+\begin{equation}
+D(p) \approx \min(r) \left( \left( \sum_{i} \left| \frac{p_i - c_i}{r_i} \right|^4 \right)^{\frac{1}{4}} - 1 \right)
+\end{equation}
+This establishes a functionally exact zero-level set formulation around the superellipse while remaining fully, smoothly differentiable anywhere across the coordinate structure, directly mapping topological clearances back into the GPMP cost derivatives.
+
+\section{Algorithmic Optimization Pipeline}
+
+\subsection{Boundary Distribution Sampling}
+The point-mass robot agent natively anchors variable initialization bounds securely matched against \texttt{env.limits}. This guarantees that origin \texttt{start\_state} and conditional \texttt{goal\_state} configurations strictly distribute globally through the dynamic maze layouts rather than defaulting uniformly to narrow subset boundaries.
+
+To enforce significant spatial movement complexity, samples are filtered heuristically rejecting routes possessing Cartesian distances lower than $\sim 20-25\%$ of the absolute physical diagonal tensor boundaries.
+
+\subsection{Path Generation (Informed RRT*)}
+The generation relies actively on explicit asymptotic guarantees integrating the base baseline configurations dynamically:
+\begin{itemize}
+    \item \textbf{Informed RRT*}: Formulates a highly-optimized topological graph-based network exploring continuously over free space mappings. Instead of randomly bridging disjoint subgraphs (\textit{RRT-Connect}), \textit{InfRRT*} immediately bounds sub-routines using analytical ellipsoidal confidence intervals strictly pulling branching gradients tighter over shorter topological distance margins globally.
+\end{itemize}
+Parameters generalized for processing compute iterations up to $N = 25000$ guaranteeing resolution routing tightly across high-density bottlenecks spanning maximum runtimes of $t = 15s$.
+
+\subsection{Graph Smoothing (GPMP2)}
+To smooth the discretely linked path network produced via the preceding algorithmic graph into a physically viable dynamic distribution dataset string:
+\begin{itemize}
+    \item We process the discrete points through \textbf{GPMP2} (Gaussian Process Motion Planner 2). The optimizer directly minimizes boundary constraints heavily querying the exact $L_4$ superellipsoid gradient bounds natively ensuring margins holding $d_{clearance} \geq 0.08$. 
+    \item Interpolation scales the routes spanning sequentially across $T \approx 64$ interpolated intervals seamlessly rendering dynamically-viable trajectory tensors mapped exactly.
+\end{itemize}
+
+\section{Dataset Storage (Minari D4RL Formatting)}
+The produced sequences compile structurally out corresponding logically:
+\begin{itemize}
+    \item \textbf{Action Shape}: $1 \times 2$ velocity delta mappings seamlessly structured across discrete trajectory sequences mathematically bounded over timestep intervals.
+    \item \textbf{Observation Shape}: Native positional representations ($T \times 4$). 
+    \item \textbf{Metadata Infos}: Extracted geometrically exact properties structurally avoiding redundant tensor copies. Appended strictly singularly per path recording exactly \texttt{ellipsoids\_centers}, \texttt{ellipsoids\_radii}, \texttt{start\_pos}, and \texttt{goal\_pos}.
+\end{itemize}
+
+Databases dynamically produced using \texttt{HDF5} standard logic generating:
+\begin{itemize}
+    \item \texttt{custom/mpd\_umaze\_ellipsoids-v2} (50 Trajectories)
+    \item \texttt{custom/mpd\_largemaze\_ellipsoids-v1} (50 Trajectories)
+\end{itemize}
+
+\end{document}
