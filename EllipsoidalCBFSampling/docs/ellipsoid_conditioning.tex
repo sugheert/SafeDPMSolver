@@ -1,0 +1,420 @@
+\documentclass{article}
+\usepackage[margin=0.85in]{geometry}
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+
+\newcommand{\softplus}{\operatorname{softplus}}
+\newcommand{\softmin}{\operatorname{softmin}}
+\newcommand{\ReLU}{\operatorname{ReLU}}
+\newcommand{\maxpool}{\operatorname{MaxPool}}
+\newcommand{\R}{\mathbb{R}}
+
+\title{Ellipsoid Obstacle Conditioning for Safe Trajectory Diffusion\\
+\large DeepSet Encoding with Classifier-Free Guidance}
+\author{Sugheerth Sreedharan}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+% =============================================================================
+\section{Overview}
+% =============================================================================
+
+This document describes the ellipsoid obstacle conditioning system added to the
+VE-SDE trajectory diffusion model for the \texttt{custom/largemaze\_ellipsoids-v1}
+dataset. The system has three components:
+
+\begin{enumerate}
+    \item \textbf{DeepSet Ellipsoid Encoder} — a permutation-invariant neural network
+          that maps a \emph{set} of up to $K=5$ ellipsoid obstacles to a single
+          scene-level conditioning vector $z \in \R^{256}$.
+
+    \item \textbf{Classifier-Free Guidance (CFG) Training} — the ellipsoid conditioning
+          is randomly dropped out during training, enabling the model to learn both
+          conditional and unconditional trajectory distributions in a single network.
+
+    \item \textbf{CFG + CBF Sampling} — at inference, a guided score estimate is formed
+          from two forward passes (conditional and unconditional), then optionally
+          corrected by the trajectory-level Control Barrier Function (CBF) for
+          hard safety guarantees.
+\end{enumerate}
+
+% =============================================================================
+\section{Ellipsoid Representation}
+% =============================================================================
+
+Each axis-aligned superellipsoid obstacle $j$ is parameterised by four scalars:
+\begin{equation}
+    e_j = (c_{xj},\; c_{yj},\; a_j,\; b_j) \in \R^4
+\end{equation}
+where $(c_{xj}, c_{yj})$ is the centre and $(a_j, b_j)$ are the semi-axes along
+$x$ and $y$ respectively.
+
+The obstacle set for a given planning problem is a \emph{set} (unordered collection)
+of up to $K=5$ ellipsoids:
+\begin{equation}
+    \mathcal{E} = \{e_1, \dots, e_N\}, \quad N \leq K
+\end{equation}
+If $N < K$, the set is padded with zero vectors $e_j = \mathbf{0}$ so that the
+encoder always receives a fixed-size input $\mathbf{E} \in \R^{K \times 4}$.
+
+The signed pseudo-distance from a 2-D point $w = (x, y)$ to obstacle $j$
+(degree-4 superellipsoid) is:
+\begin{equation}
+    d_j(w) = \sqrt[4]{\left(\frac{c_{xj} - x}{a_j}\right)^4 +
+                       \left(\frac{c_{yj} - y}{b_j}\right)^4 + \varepsilon} - 1
+\end{equation}
+with $d_j > 0$ indicating a safe distance and $d_j < 0$ indicating penetration.
+This signed distance is used directly by the CBF (see \texttt{formulation.tex});
+the encoder operates on the raw parameterisation $e_j$ instead.
+
+% =============================================================================
+\section{DeepSet Ellipsoid Encoder}
+% =============================================================================
+
+\subsection{Motivation}
+
+The obstacle set $\mathcal{E}$ is \emph{unordered}: there is no canonical ordering
+of obstacles, and the trajectory planner should be invariant to permutations.
+A standard MLP over the concatenated obstacle list would break this symmetry.
+
+We use the \textbf{DeepSets} framework~\cite{zaheer2017deep}, which achieves
+permutation invariance via:
+\begin{equation}
+    f(\mathcal{E}) = \rho\!\left(\bigoplus_{j=1}^{K} \phi(e_j)\right)
+\end{equation}
+where $\phi$ is an element-wise (equivariant) transformation, $\bigoplus$ is a
+permutation-invariant aggregation (here: \emph{max-pooling}), and $\rho$ is a
+final invariant projection. Intermediate equivariant layers allow elements to
+``interact'' via the global context before pooling.
+
+\subsection{Architecture}
+
+\paragraph{Input.} $\mathbf{E} \in \R^{K \times 4}$, where each row is
+$e_j = (c_{xj}, c_{yj}, a_j, b_j)$ and $K=5$.
+
+\paragraph{Embedding.}
+\begin{equation}
+    \mathbf{H}^{(0)} = \ReLU\!\left(\mathbf{E}\,W_{\mathrm{emb}}^\top + b_{\mathrm{emb}}\right)
+    \in \R^{K \times d}, \quad d = 128
+\end{equation}
+
+\paragraph{DeepSet Layers (equivariant).}
+Each layer combines a local (element-wise) path and a global (max-pooled) path:
+\begin{equation}
+    \mathbf{H}^{(\ell+1)}_j = \ReLU\!\left(
+        \lambda^{(\ell)}\!\left(\mathbf{H}^{(\ell)}_j\right)
+        + \gamma^{(\ell)}\!\left(\max_{j'} \mathbf{H}^{(\ell)}_{j'}\right)
+    \right)
+\end{equation}
+where $\lambda^{(\ell)}, \gamma^{(\ell)} : \R^d \to \R^d$ are linear maps
+(with independent weights), and the max is taken element-wise over the $K$
+set dimension. Two such layers are applied ($\ell = 0, 1$).
+
+\paragraph{Invariant Pooling.}
+\begin{equation}
+    \mathbf{s} = \max_{j=1}^{K} \mathbf{H}^{(2)}_j \in \R^d
+\end{equation}
+
+\paragraph{Output Projection ($\rho$).}
+\begin{equation}
+    z = \rho(\mathbf{s}) = W_2\,\ReLU\!\left(W_1\,\mathbf{s} + b_1\right) + b_2
+    \in \R^{d_z}, \quad d_z = 256
+\end{equation}
+
+\paragraph{Null conditioning.}
+When $\mathbf{E} = \mathbf{0}$ (all obstacle slots zeroed), the encoder outputs
+a fixed vector $z_\emptyset = \rho(\mathbf{0})$, which the model learns to
+associate with the unconditional distribution (see Section~\ref{sec:cfg}).
+
+\subsection{Parameter Count}
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Component & Parameters \\
+\midrule
+Embedding $W_{\mathrm{emb}}$ & $4 \times 128 + 128 = 640$ \\
+DeepSetLayer 1 ($\lambda + \gamma$) & $2 \times (128 \times 128 + 128) = 32{,}896$ \\
+DeepSetLayer 2 ($\lambda + \gamma$) & $2 \times (128 \times 128 + 128) = 32{,}896$ \\
+$\rho$: Linear($128 \to 128$) & $128 \times 128 + 128 = 16{,}512$ \\
+$\rho$: Linear($128 \to 256$) & $128 \times 256 + 256 = 33{,}024$ \\
+\midrule
+\textbf{Total} & \textbf{116,}$\mathbf{0}$\textbf{08} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Integration into TemporalUnet}
+
+The existing conditioning vector for the VE-SDE score network is:
+\begin{equation}
+    c = \left[\tau(\sigma)\;;\; \mathrm{Linear}([x_{\mathrm{start}}, x_{\mathrm{goal}}])\right]
+    \in \R^{32 + 4}
+\end{equation}
+where $\tau(\sigma)$ is the sinusoidal sigma encoding and the second term
+projects the start/goal positions.
+
+With ellipsoid conditioning, the vector is extended to:
+\begin{equation}
+\boxed{
+    c = \left[\tau(\sigma)\;;\; \mathrm{Linear}([x_{\mathrm{start}}, x_{\mathrm{goal}}])\;;\;
+              \mathrm{EllipsoidFiLMEncoder}(\mathbf{E})\right]
+    \in \R^{32 + 4 + 256 = 292}
+}
+\end{equation}
+This vector is injected into every \texttt{ResidualTemporalBlock} of the U-Net
+via the conditioning MLP, which applies a learned affine shift in the channel
+dimension.
+
+% =============================================================================
+\section{Classifier-Free Guidance}
+\label{sec:cfg}
+% =============================================================================
+
+\subsection{Training with Conditional Dropout}
+
+During training we want the model $\epsilon_\theta$ to estimate:
+\begin{itemize}
+    \item $\epsilon_\theta(x_\sigma, \sigma, x_s, x_g, \mathbf{E})$ — noise
+          given the full conditioning (trajectory endpoints \emph{and} obstacles)
+    \item $\epsilon_\theta(x_\sigma, \sigma, x_s, x_g, \mathbf{0})$ — noise
+          without obstacle conditioning (unconditional w.r.t.\ obstacles)
+\end{itemize}
+in a single network, by using a shared \emph{null token} $\mathbf{0}$.
+
+Concretely, given a mini-batch $\{(x_0^{(i)}, x_s^{(i)}, x_g^{(i)}, \mathbf{E}^{(i)})\}_{i=1}^B$,
+the training loss is:
+\begin{equation}
+    \mathcal{L} = \mathbb{E}_{i,\, \sigma,\, \varepsilon}\!\left[
+        \left\|\epsilon_\theta\!\left(x_0^{(i)} + \sigma\varepsilon,\; \sigma,\;
+                                      x_s^{(i)},\; x_g^{(i)},\; \tilde{\mathbf{E}}^{(i)}\right)
+               - \varepsilon\right\|^2
+    \right]
+\end{equation}
+where the dropout-augmented obstacle input is:
+\begin{equation}
+    \tilde{\mathbf{E}}^{(i)} =
+    \begin{cases}
+        \mathbf{0}_{K \times 4} & \text{with probability } p_{\mathrm{uncond}} = 0.1 \\
+        \mathbf{E}^{(i)}        & \text{with probability } 1 - p_{\mathrm{uncond}}
+    \end{cases}
+\end{equation}
+The dropout mask is sampled \emph{independently per sample} in the batch,
+so both conditional and unconditional examples appear in every update.
+
+\subsection{Guided Inference}
+
+At inference, the guided score estimate is formed by linearly extrapolating from the
+unconditional to the conditional prediction:
+\begin{equation}
+\boxed{
+    \hat{\epsilon}(x, \sigma, x_s, x_g, \mathbf{E}; w)
+    = \epsilon_\theta(x, \sigma, x_s, x_g, \mathbf{0})
+      + w \cdot \Bigl[
+          \epsilon_\theta(x, \sigma, x_s, x_g, \mathbf{E})
+          - \epsilon_\theta(x, \sigma, x_s, x_g, \mathbf{0})
+        \Bigr]
+}
+\end{equation}
+where $w \geq 0$ is the \textbf{guidance scale}. Special cases:
+\begin{itemize}
+    \item $w = 0$: unconditional sampling (obstacle-unaware)
+    \item $w = 1$: standard conditional sampling
+    \item $w > 1$: guidance pushes the trajectory more strongly toward the
+          obstacle-free region (\emph{over-guidance})
+\end{itemize}
+A default of $w = 3.0$ is used, amplifying the obstacle-avoidance signal
+while preserving trajectory smoothness.
+
+% =============================================================================
+\section{CFG DPM-Solver-1 Update}
+% =============================================================================
+
+The base DPM-Solver-1 step for VE-SDE (no safety) replaces the plain
+$\epsilon_\theta$ with the guided prediction $\hat\epsilon$:
+
+\begin{equation}
+    x_{t_i} = x_{t_{i-1}} - (\sigma_{t_{i-1}} - \sigma_{t_i})\,
+              \hat{\epsilon}(x_{t_{i-1}}, \sigma_{t_{i-1}}, x_s, x_g, \mathbf{E}; w)
+\end{equation}
+
+Start ($x_s$) and goal ($x_g$) waypoints are re-pinned (\emph{inpainting})
+after each step.
+
+% =============================================================================
+\section{Integration with CBF Safety Correction}
+% =============================================================================
+
+The CBF correction from \texttt{formulation.tex} is applied \emph{after} the CFG
+blend, using the guided prediction $\hat\epsilon$ in place of $\epsilon_\theta$.
+The full safe CFG step is:
+
+\begin{equation}
+    x_{t_i} = x_{t_{i-1}} - (\sigma_{t_{i-1}} - \sigma_{t_i})\,\hat\epsilon_s
+              + u^*(x_{t_{i-1}},\, t_{i-1})
+\end{equation}
+
+where $\hat\epsilon_s = \hat{\epsilon}(x_{t_{i-1}}, \sigma_{t_{i-1}}, x_s, x_g, \mathbf{E}; w)$
+and the CBF control term (VE case) is:
+
+\begin{equation}
+    u^*(x,t) =
+    \begin{cases}
+        -\dfrac{\min(0,\,\omega)\,}{\|\nabla h\|_2^2 + \gamma^{-1}h^2}\,\nabla h
+        & \omega < 0 \\[6pt]
+        \mathbf{0} & \omega \geq 0
+    \end{cases}
+\end{equation}
+
+\begin{equation}
+    \omega = \dot\sigma_t\,\nabla h(x)^\top \hat\epsilon_s + \alpha_0\,h(x)
+\end{equation}
+
+\noindent\textbf{Separation of concerns:}
+The learned conditioning ($\mathbf{E}$ fed to the encoder) and the CBF geometry
+(raw obstacle parameters used to evaluate $h$ and $\nabla h$) are kept separate:
+\begin{itemize}
+    \item The encoder learns a \emph{soft}, data-driven avoidance prior embedded
+          in the score function.
+    \item The CBF provides a \emph{hard}, geometry-based safety guarantee that is
+          active regardless of how well the model has learned to avoid obstacles.
+\end{itemize}
+This dual approach is robust: even if the model's obstacle conditioning is imperfect
+(e.g., for out-of-distribution obstacle configurations), the CBF still corrects
+unsafe steps.
+
+% =============================================================================
+\section{Full Algorithm}
+% =============================================================================
+
+\begin{algorithm}[H]
+\caption{CFG DPM-Solver-1 + CBF Sampling}
+\begin{algorithmic}[1]
+\Require Trained model $\epsilon_\theta$, VE schedule $\{\sigma_i\}_{i=0}^{n}$
+         (decreasing), obstacle set $\mathbf{E} \in \R^{K\times4}$,
+         raw obstacle geometry $\{e_j\}_{j=1}^N$ for CBF,
+         start $x_s$, goal $x_g$, guidance scale $w$,
+         CBF parameters $k_1, k_2, c, \alpha_0, \gamma$
+\State $x \leftarrow \mathcal{N}(0, \sigma_0^2 I)$ \Comment{Pure noise prior}
+\For{$i = 0, 1, \dots, n-1$}
+    \State $\epsilon_c \leftarrow \epsilon_\theta(x, \sigma_i, x_s, x_g, \mathbf{E})$
+           \Comment{Conditional}
+    \State $\epsilon_u \leftarrow \epsilon_\theta(x, \sigma_i, x_s, x_g, \mathbf{0})$
+           \Comment{Unconditional}
+    \State $\hat\epsilon \leftarrow \epsilon_u + w(\epsilon_c - \epsilon_u)$
+           \Comment{CFG blend}
+    \State $x_{\mathrm{new}} \leftarrow x - (\sigma_i - \sigma_{i+1})\,\hat\epsilon$
+           \Comment{Base ODE step}
+    \State Compute $h(x), \nabla h(x), \omega$
+           using $\hat\epsilon$ and raw obstacle geometry
+    \If{$\omega < 0$}
+        \State $x_{\mathrm{new}} \leftarrow x_{\mathrm{new}}
+                - \dfrac{\omega}{\|\nabla h\|^2 + \gamma^{-1}h^2}\,\nabla h$
+                \Comment{CBF correction}
+    \EndIf
+    \State $x_{\mathrm{new}}[\,0\,] \leftarrow x_s$;\;
+           $x_{\mathrm{new}}[\,-1\,] \leftarrow x_g$
+           \Comment{Inpainting}
+    \State $x \leftarrow x_{\mathrm{new}}$
+\EndFor
+\State \Return $x$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{CFG Training with Obstacle Dropout}
+\begin{algorithmic}[1]
+\Require Dataset $\mathcal{D} = \{(x_0, x_s, x_g, \mathbf{E})\}$,
+         dropout probability $p_{\mathrm{uncond}} = 0.1$,
+         noise schedule $\{\sigma_i\}$
+\For{each mini-batch}
+    \For{each sample $(x_0, x_s, x_g, \mathbf{E})$ in batch}
+        \State Sample noise level $\sigma \sim \{\sigma_i\}$ uniformly
+        \State Sample $\varepsilon \sim \mathcal{N}(0, I)$
+        \State $x_\sigma \leftarrow x_0 + \sigma\varepsilon$
+        \State With prob.\ $p_{\mathrm{uncond}}$: $\tilde{\mathbf{E}} \leftarrow \mathbf{0}$;
+               else $\tilde{\mathbf{E}} \leftarrow \mathbf{E}$
+        \State $\mathcal{L}_i \leftarrow \|\epsilon_\theta(x_\sigma, \sigma, x_s, x_g, \tilde{\mathbf{E}}) - \varepsilon\|^2$
+    \EndFor
+    \State Update $\theta$ via Adam on $\frac{1}{B}\sum_i \mathcal{L}_i$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+% =============================================================================
+\section{Hyperparameters}
+% =============================================================================
+
+\begin{center}
+\begin{tabular}{llr}
+\toprule
+\textbf{Parameter} & \textbf{Description} & \textbf{Default} \\
+\midrule
+$K$ & Fixed obstacle set size & 5 \\
+$d$ & DeepSet hidden dimension & 128 \\
+$d_z$ & Ellipsoid encoder output dimension & 256 \\
+$p_{\mathrm{uncond}}$ & CFG training dropout probability & 0.1 \\
+$w$ & CFG guidance scale at inference & 3.0 \\
+\midrule
+$\sigma_{\min}$ & VE noise schedule minimum & 0.01 \\
+$\sigma_{\max}$ & VE noise schedule maximum & 10.0 \\
+$N$ & Number of noise levels & 1000 \\
+$T$ & Trajectory horizon (waypoints) & dataset-dependent \\
+\midrule
+$k_1$ & CBF obstacle softmin temperature & 1.0 \\
+$k_2$ & CBF waypoint softmin temperature & 1.0 \\
+$c$ & CBF softplus sharpness & 1.0 \\
+$\alpha_0$ & CBF class-K function gain & 1.0 \\
+$\gamma$ & CBF regularisation & 1.0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% =============================================================================
+\section{File Summary}
+% =============================================================================
+
+All new files are placed under \texttt{EllipsoidalCBFSampling/}:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{File} & \textbf{Description} \\
+\midrule
+\texttt{models/score\_net\_ellipsoids.py}     & \texttt{TemporalUnet} + \texttt{EllipsoidFiLMEncoder} \\
+\texttt{models/ve\_diffusion\_ellipsoids.py}  & \texttt{VEDiffusion} with CFG dropout \\
+\texttt{models/samplers\_ellipsoids\_cfg.py}  & CFG sampler and CFG+CBF sampler \\
+\texttt{train\_large\_ellipsoids\_diffuser.ipynb} & Training notebook \\
+\texttt{docs/ellipsoid\_conditioning.tex}     & This document \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{thebibliography}{9}
+\bibitem{zaheer2017deep}
+    M.\ Zaheer, S.\ Kottur, S.\ Ravanbhakhsh, B.\ Poczos, R.\ R.\ Salakhutdinov, A.\ J.\ Smola.
+    \emph{Deep Sets}.
+    NeurIPS 2017.
+
+\bibitem{ho2022cfg}
+    J.\ Ho, T.\ Salimans.
+    \emph{Classifier-Free Diffusion Guidance}.
+    NeurIPS 2022 Workshop on Score-Based Methods.
+
+\bibitem{song2021score}
+    Y.\ Song, J.\ Sohl-Dickstein, D.\ P.\ Kingma, A.\ Kumar, S.\ Ermon, B.\ Poole.
+    \emph{Score-Based Generative Modeling through Stochastic Differential Equations}.
+    ICLR 2021.
+\end{thebibliography}
+
+\end{document}
