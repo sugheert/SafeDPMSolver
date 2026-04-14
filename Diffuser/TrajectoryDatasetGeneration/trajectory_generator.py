@@ -80,7 +80,7 @@ class MultiEllipsoidField(PrimitiveShapeField):
                         
         return obst_map
 
-    def render(self, ax, pos=None, ori=None, color='gray', cmap='gray', **kwargs):
+    def render(self, ax, pos=None, ori=None, color='red', cmap='gray', **kwargs):
         for center, radii in zip(self.centers, self.radii):
             c_np = to_numpy(center)
             r_np = to_numpy(radii)
@@ -96,7 +96,7 @@ class MultiEllipsoidField(PrimitiveShapeField):
                 # x = c_x + r_x * sign(cos t) * |cos t|^(2/4)
                 x = c_np[0] + r_np[0] * np.sign(np.cos(t)) * np.sqrt(np.abs(np.cos(t)))
                 y = c_np[1] + r_np[1] * np.sign(np.sin(t)) * np.sqrt(np.abs(np.sin(t)))
-                polygon = plt.Polygon(np.column_stack([x, y]), color=color, alpha=1)
+                polygon = plt.Polygon(np.column_stack([x, y]), facecolor='red', edgecolor='red', alpha=0.5)
                 ax.add_patch(polygon)
 
 from torch_robotics.environments.env_base import EnvBase
