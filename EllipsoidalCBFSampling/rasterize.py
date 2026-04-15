@@ -183,8 +183,8 @@ def rasterize_scene(
         valid = (a > 0).float()
 
         inside = (
-            ((grid_x - cx) / (a + 1e-6)) ** 2
-          + ((grid_y - cy) / (b + 1e-6)) ** 2
+            ((grid_x - cx) / (a + 1e-6)) ** 4
+          + ((grid_y - cy) / (b + 1e-6)) ** 4
         ) <= 1.0
 
         occ = occ + valid * inside.float()
