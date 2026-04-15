@@ -1,30 +1,33 @@
 """
-score_net_ellipsoids.py — TemporalUnet conditioned on ellipsoidal obstacles.
+score_net_ellipsoids.py — TemporalUnet conditioned on a rasterized occupancy map.
 
-Extends models/score_net.py with a DeepSet-based ellipsoid encoder that
-encodes a set of up to 5 axis-aligned superellipsoid obstacles into a
-256-dim conditioning vector, appended to the existing sigma + start/goal
-conditioning.
+Replaces the DeepSet-based EllipsoidFiLMEncoder with a CNN MapEncoder that
+reads a binary occupancy bitmap [B, 1, H, W] containing both maze walls and
+ellipsoid obstacles.  The encoder produces a global scene vector [B, 256]
+via average-pooling, which is used as a FiLM conditioning signal appended to
+the existing sigma + start/goal conditioning.
 
-Ellipsoid conditioning supports Classifier-Free Guidance (CFG): pass
-zeros([B, 5, 4]) as the null (unconditional) ellipsoid input.
+Null (unconditional) input for CFG: pass an all-zeros bitmap.
 
-Architecture additions:
-    EllipsoidFiLMEncoder: [B, 5, 4] -> [B, 256]
-        embed  : Linear(4 -> 128) + ReLU
-        layer1 : DeepSetLayer(128)      (equivariant)
-        layer2 : DeepSetLayer(128)      (equivariant)
-        rho    : max-pool + Linear(128->128) + ReLU + Linear(128->256)   (invariant)
+Architecture:
+    occ_map [B, 1, H, W]
+        → MapEncoder  → feat_map [B, local_dim, H/8, W/8]
+        → GlobalPoolHead → map_global [B, global_dim]
+        → cat([time_emb, ctx, map_global]) → c_emb [B, cond_dim]
+        → FiLM inject into every ResidualTemporalBlock
 
 Modified TemporalUnet.forward signature:
-    forward(x, sigma, x_start, x_goal, ellipsoids)
-    where ellipsoids: [B, 5, 4]  — each row (cx, cy, a, b); pad missing with zeros
+    forward(x, sigma, x_start, x_goal, occ_map)
+    where occ_map: [B, 1, H, W]  — binary occupancy, zeros = unconditional
+
+Legacy EllipsoidFiLMEncoder is retained below for reference.
 """
 
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision.models as tvm
 from einops import rearrange
 from einops.layers.torch import Rearrange
 
@@ -209,17 +212,77 @@ class EllipsoidFiLMEncoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Temporal U-Net with ellipsoid conditioning
+# CNN occupancy-map encoder
+# ---------------------------------------------------------------------------
+
+class MapEncoder(nn.Module):
+    """
+    Encodes a binary occupancy bitmap into a spatial feature map.
+
+    Uses the first two layer groups of a ResNet-18 backbone (conv1 through
+    layer2) adapted for single-channel input, followed by a 1×1 projection.
+
+    Input  : [B, 1, H, W]                binary occupancy map
+    Output : [B, local_dim, H/8, W/8]    spatial feature map
+
+    For H=W=64, the output spatial size is 8×8.
+    The feature map is computed once per scene and reused across all
+    denoising iterations.
+    """
+    def __init__(self, local_dim: int = 16):
+        super().__init__()
+        resnet = tvm.resnet18(weights=None)
+        # Patch conv1 to accept single-channel (grayscale) input
+        resnet.conv1 = nn.Conv2d(
+            1, 64, kernel_size=7, stride=2, padding=3, bias=False
+        )
+        self.backbone = nn.Sequential(
+            resnet.conv1,
+            resnet.bn1,
+            resnet.relu,
+            resnet.maxpool,
+            resnet.layer1,   # [B, 64,  H/4,  W/4]
+            resnet.layer2,   # [B, 128, H/8,  W/8]
+        )
+        self.proj = nn.Conv2d(128, local_dim, kernel_size=1)
+
+    def forward(self, occ_map: torch.Tensor) -> torch.Tensor:
+        # occ_map: [B, 1, H, W]
+        return self.proj(self.backbone(occ_map))   # [B, local_dim, H/8, W/8]
+
+
+class GlobalPoolHead(nn.Module):
+    """
+    Pools a spatial feature map into a single global conditioning vector.
+
+    Input  : [B, local_dim, H', W']
+    Output : [B, global_dim]
+    """
+    def __init__(self, local_dim: int = 16, global_dim: int = 256):
+        super().__init__()
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.proj = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(local_dim, global_dim),
+            nn.ReLU(),
+        )
+
+    def forward(self, feat_map: torch.Tensor) -> torch.Tensor:
+        return self.proj(self.pool(feat_map))   # [B, global_dim]
+
+
+# ---------------------------------------------------------------------------
+# Temporal U-Net with rasterized-map conditioning
 # ---------------------------------------------------------------------------
 
 class TemporalUnet(nn.Module):
     """
-    MPD-style 1D temporal U-Net for trajectory denoising, adapted for VE-SDE
-    with additional DeepSet-based ellipsoid obstacle conditioning.
+    MPD-style 1D temporal U-Net for trajectory denoising, conditioned on a
+    rasterized occupancy map via a CNN-based global FiLM vector.
 
     Conditioning vector fed to every ResidualTemporalBlock:
-        c_emb = cat(TimeEncoder(sigma), Linear(cat(x_start,x_goal)), EllipsoidFiLMEncoder(ellipsoids))
-        cond_dim = time_emb_dim + conditioning_embed_dim + ellipsoid_output_dim
+        c_emb = cat(TimeEncoder(sigma), Linear(cat(x_start,x_goal)), GlobalPoolHead(MapEncoder(occ_map)))
+        cond_dim = time_emb_dim + conditioning_embed_dim + global_dim
 
     Args:
         state_dim              : spatial dims per waypoint (2 for x,y)
@@ -228,8 +291,8 @@ class TemporalUnet(nn.Module):
         dim_mults              : channel multipliers per U-Net level ((1,2,4))
         time_emb_dim           : output dim of the sigma (time) encoder (32)
         conditioning_embed_dim : dim to project cat(x_start,x_goal) into (4)
-        ellipsoid_hidden_dim   : hidden dim of EllipsoidFiLMEncoder (128)
-        ellipsoid_output_dim   : output dim of EllipsoidFiLMEncoder (256)
+        local_dim              : MapEncoder intermediate feature channels (16)
+        global_dim             : GlobalPoolHead output dim, feeds FiLM (256)
     """
 
     def __init__(
@@ -240,8 +303,8 @@ class TemporalUnet(nn.Module):
         dim_mults:              tuple = (1, 2, 4),
         time_emb_dim:           int   = 32,
         conditioning_embed_dim: int   = 4,
-        ellipsoid_hidden_dim:   int   = 128,
-        ellipsoid_output_dim:   int   = 256,
+        local_dim:              int   = 16,
+        global_dim:             int   = 256,
     ):
         super().__init__()
         self.state_dim = state_dim
@@ -250,16 +313,13 @@ class TemporalUnet(nn.Module):
         # ---- Conditioning ----
         self.context_proj = nn.Linear(state_dim * 2, conditioning_embed_dim)
         self.time_mlp     = TimeEncoder(dim=32, dim_out=time_emb_dim)
-        self.ellipsoid_encoder = EllipsoidFiLMEncoder(
-            input_dim=4,
-            hidden_dim=ellipsoid_hidden_dim,
-            output_dim=ellipsoid_output_dim,
-        )
+        self.map_encoder  = MapEncoder(local_dim=local_dim)
+        self.global_head  = GlobalPoolHead(local_dim=local_dim, global_dim=global_dim)
 
         # cond_dim fed to every ResidualTemporalBlock
-        cond_dim = time_emb_dim + conditioning_embed_dim + ellipsoid_output_dim
+        cond_dim = time_emb_dim + conditioning_embed_dim + global_dim
 
-        # ---- Channel dims ----
+        # ---- Channel dims (U-Net input channels unchanged — no local concat) ----
         dims   = [state_dim, *[unet_input_dim * m for m in dim_mults]]
         in_out = list(zip(dims[:-1], dims[1:]))
 
@@ -301,18 +361,19 @@ class TemporalUnet(nn.Module):
 
     def forward(
         self,
-        x:          torch.Tensor,   # [B, T, 2]   noisy trajectory
-        sigma:      torch.Tensor,   # [B]          noise level
-        x_start:    torch.Tensor,   # [B, 2]       start condition
-        x_goal:     torch.Tensor,   # [B, 2]       goal  condition
-        ellipsoids: torch.Tensor,   # [B, 5, 4]    ellipsoid set (cx,cy,a,b); zeros = null
+        x:       torch.Tensor,   # [B, T, 2]     noisy trajectory
+        sigma:   torch.Tensor,   # [B]            noise level
+        x_start: torch.Tensor,   # [B, 2]         start condition
+        x_goal:  torch.Tensor,   # [B, 2]         goal  condition
+        occ_map: torch.Tensor,   # [B, 1, H, W]   binary occupancy map; zeros = unconditional
     ) -> torch.Tensor:
         """Returns predicted noise eps : [B, T, 2]."""
 
-        t_emb        = self.time_mlp(sigma)                                    # [B, time_emb_dim]
-        ctx          = self.context_proj(torch.cat([x_start, x_goal], dim=-1)) # [B, cond_emb_dim]
-        ellipsoid_emb = self.ellipsoid_encoder(ellipsoids)                     # [B, ellipsoid_output_dim]
-        c_emb        = torch.cat([t_emb, ctx, ellipsoid_emb], dim=-1)          # [B, cond_dim]
+        t_emb      = self.time_mlp(sigma)                                     # [B, time_emb_dim]
+        ctx        = self.context_proj(torch.cat([x_start, x_goal], dim=-1))  # [B, cond_emb_dim]
+        feat_map   = self.map_encoder(occ_map)                                # [B, local_dim, H', W']
+        map_global = self.global_head(feat_map)                               # [B, global_dim]
+        c_emb      = torch.cat([t_emb, ctx, map_global], dim=-1)              # [B, cond_dim]
 
         x = rearrange(x, 'b t d -> b d t')   # [B, 2, T]
 

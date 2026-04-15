@@ -2,7 +2,7 @@
 samplers_ellipsoids_cfg.py — DPM-Solver-1 samplers with CFG + ellipsoidal CBF.
 
 Extends EllipsoidalCBFSampling/models/samplers_ellipses.py to support
-Classifier-Free Guidance (CFG) for ellipsoid obstacle conditioning.
+Classifier-Free Guidance (CFG) for rasterized-map conditioning.
 
 Provides:
     dpm_solver_1_cfg_sample        — plain CFG ODE (no CBF safety)
@@ -12,8 +12,8 @@ Provides:
 
 CFG inference:
     Per denoising step, two forward passes are made:
-        eps_cond   = model(x, sigma, x_start, x_goal, ellipsoids)
-        eps_uncond = model(x, sigma, x_start, x_goal, zeros_like(ellipsoids))
+        eps_cond   = model(x, sigma, x_start, x_goal, occ_map)
+        eps_uncond = model(x, sigma, x_start, x_goal, zeros_like(occ_map))
         eps_guided = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
 
     When guidance_scale=1.0, this reduces to the conditional prediction only.
@@ -52,7 +52,7 @@ def dpm_solver_1_cfg_sample(
     ve_diffusion,
     x_start:        torch.Tensor,       # [2] or [B, 2]
     x_goal:         torch.Tensor,       # [2] or [B, 2]
-    ellipsoids:     torch.Tensor,       # [B, 5, 4]  (cx,cy,a,b); zeros = null
+    occ_map:        torch.Tensor,       # [B, 1, H, W]  rasterized occupancy map
     T_steps:        int   = 64,
     n_steps:        int   = 25,
     guidance_scale: float = 3.0,
@@ -61,13 +61,14 @@ def dpm_solver_1_cfg_sample(
     return_history: bool  = False,
 ):
     """
-    DPM-Solver-1 with Classifier-Free Guidance for ellipsoid conditioning.
+    DPM-Solver-1 with Classifier-Free Guidance for rasterized-map conditioning.
 
         eps_guided = eps_uncond + w * (eps_cond - eps_uncond)
         x_{i+1}   = x_i - (sigma_i - sigma_{i+1}) * eps_guided
 
     Args:
-        ellipsoids    : [B, 5, 4] obstacle set; pass zeros([B,5,4]) for unconditional.
+        occ_map       : [B, 1, H, W] binary occupancy map (walls + ellipsoids).
+                        Pass zeros_like(occ_map) for unconditional sampling.
         guidance_scale: CFG weight w (>=1 strengthens conditioning; 1 = conditional only).
         x_init        : optional shared prior [B, T, 2].
         return_history: if True, also return list of [B, T, 2] at each step.
@@ -80,9 +81,9 @@ def dpm_solver_1_cfg_sample(
         x_start = x_start.unsqueeze(0)
         x_goal  = x_goal.unsqueeze(0)
     B = x_start.shape[0]
-    x_start    = x_start.to(device)
-    x_goal     = x_goal.to(device)
-    ellipsoids = ellipsoids.to(device)
+    x_start = x_start.to(device)
+    x_goal  = x_goal.to(device)
+    occ_map = occ_map.to(device)
 
     sigmas    = ve_diffusion.sigmas.to(device)
     N_lvl     = ve_diffusion.n_levels
@@ -94,8 +95,8 @@ def dpm_solver_1_cfg_sample(
     else:
         x = torch.randn(B, T_steps, 2, device=device) * sigma_seq[0]
 
-    null_ellipsoids = torch.zeros_like(ellipsoids)
-    history = [x.clone()] if return_history else None
+    null_map = torch.zeros_like(occ_map)
+    history  = [x.clone()] if return_history else None
 
     for i in range(n_steps):
         sig_cur  = sigma_seq[i]
@@ -103,8 +104,8 @@ def dpm_solver_1_cfg_sample(
         sig_b    = sig_cur.expand(B)
 
         # Two model calls for CFG
-        eps_cond   = model(x, sig_b, x_start, x_goal, ellipsoids)
-        eps_uncond = model(x, sig_b, x_start, x_goal, null_ellipsoids)
+        eps_cond   = model(x, sig_b, x_start, x_goal, occ_map)
+        eps_uncond = model(x, sig_b, x_start, x_goal, null_map)
         eps_guided = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
 
         x = x - (sig_cur - sig_next) * eps_guided
@@ -266,8 +267,8 @@ def dpm_solver_1_cbf_cfg_sample(
     ve_diffusion,
     x_start:        torch.Tensor,       # [2] or [B, 2]
     x_goal:         torch.Tensor,       # [2] or [B, 2]
-    ellipsoids:     torch.Tensor,       # [B, 5, 4]  learned conditioning
-    obstacles:      torch.Tensor,       # [N, 4]     raw geometry for CBF (cx,cy,a,b)
+    occ_map:        torch.Tensor,       # [B, 1, H, W]  rasterized map (model conditioning)
+    obstacles:      torch.Tensor,       # [N, 4]        raw geometry for CBF (cx,cy,a,b)
     T_steps:        int   = 64,
     n_steps:        int   = 25,
     guidance_scale: float = 3.0,
@@ -291,8 +292,9 @@ def dpm_solver_1_cbf_cfg_sample(
         4. Inpainting: re-pin start and goal waypoints
 
     Args:
-        ellipsoids    : [B, 5, 4]  — learned conditioning (for model forward pass)
-        obstacles     : [N, 4]     — raw ellipsoid geometry for CBF (cx,cy,a,b)
+        occ_map       : [B, 1, H, W]  — rasterized occupancy map for model conditioning.
+                        Pass zeros_like(occ_map) for unconditional sampling.
+        obstacles     : [N, 4]        — raw ellipsoid geometry for CBF (cx,cy,a,b)
                         Pass torch.zeros(0, 4) to disable CBF.
         guidance_scale: CFG blending weight (>=1 recommended).
         return_history: if True, return (x, traj_history, before_history, cbf_history).
@@ -310,10 +312,10 @@ def dpm_solver_1_cbf_cfg_sample(
         x_start = x_start.unsqueeze(0)
         x_goal  = x_goal.unsqueeze(0)
     B = x_start.shape[0]
-    x_start    = x_start.to(device)
-    x_goal     = x_goal.to(device)
-    ellipsoids = ellipsoids.to(device)
-    obstacles  = obstacles.to(device)
+    x_start   = x_start.to(device)
+    x_goal    = x_goal.to(device)
+    occ_map   = occ_map.to(device)
+    obstacles = obstacles.to(device)
 
     sigmas    = ve_diffusion.sigmas.to(device)
     N_lvl     = ve_diffusion.n_levels
@@ -325,8 +327,8 @@ def dpm_solver_1_cbf_cfg_sample(
     else:
         x = torch.randn(B, T_steps, 2, device=device) * sigma_seq[0]
 
-    null_ellipsoids = torch.zeros_like(ellipsoids)
-    has_obstacles   = obstacles.shape[0] > 0
+    null_map      = torch.zeros_like(occ_map)
+    has_obstacles = obstacles.shape[0] > 0
 
     traj_history   = [x.clone()] if return_history else None
     before_history = [x.clone()] if return_history else None
@@ -350,8 +352,8 @@ def dpm_solver_1_cbf_cfg_sample(
         sig_b    = sig_cur.expand(B)
 
         # CFG: two model calls, blend
-        eps_cond   = model(x, sig_b, x_start, x_goal, ellipsoids)
-        eps_uncond = model(x, sig_b, x_start, x_goal, null_ellipsoids)
+        eps_cond   = model(x, sig_b, x_start, x_goal, occ_map)
+        eps_uncond = model(x, sig_b, x_start, x_goal, null_map)
         eps_guided = eps_uncond + guidance_scale * (eps_cond - eps_uncond)  # [B, T, 2]
 
         # Base ODE step ("before control" trajectory)

@@ -1,14 +1,14 @@
 """
-ve_diffusion_ellipsoids.py — VEDiffusion with ellipsoid obstacle conditioning + CFG.
+ve_diffusion_ellipsoids.py — VEDiffusion with rasterized-map conditioning + CFG.
 
-Extends models/ve_diffusion.py to accept ellipsoid obstacle information
-([B, 5, 4]) and support Classifier-Free Guidance (CFG) training via
-conditional dropout.
+Extends models/ve_diffusion.py to accept a rasterized binary occupancy map
+([B, 1, H, W]) in place of the parametric ellipsoid set, and support
+Classifier-Free Guidance (CFG) training via conditional dropout.
 
 CFG training:
-    With probability p_uncond per sample, the ellipsoid conditioning is
-    replaced with zeros before the forward pass. This teaches the network
-    both the conditional p(trajectory | start, goal, ellipsoids) and the
+    With probability p_uncond per sample, the occupancy map is replaced with
+    an all-zeros bitmap before the forward pass.  This teaches the network
+    both the conditional p(trajectory | start, goal, occ_map) and the
     unconditional p(trajectory | start, goal) distributions in one model.
 
 Noise schedule: geometric interpolation between sigma_min and sigma_max
@@ -16,7 +16,7 @@ Noise schedule: geometric interpolation between sigma_min and sigma_max
 
 Training loss (denoising score matching, predicting noise eps):
     L = E_{i, x0, eps} [ || eps_theta(x0 + sigma_i * eps, sigma_i,
-                                       x_start, x_goal, ellipsoids_dropped)
+                                       x_start, x_goal, occ_map_dropped)
                            - eps ||^2 ]
 """
 
@@ -64,17 +64,18 @@ class VEDiffusion(nn.Module):
 
     def loss(
         self,
-        x0:         torch.Tensor,   # [B, T, 2]   clean trajectories
-        x_start:    torch.Tensor,   # [B, 2]       trajectory starts
-        x_goal:     torch.Tensor,   # [B, 2]       trajectory goals
-        ellipsoids: torch.Tensor,   # [B, 5, 4]    obstacle set (cx,cy,a,b)
-        p_uncond:   float = 0.1,    # probability of dropping ellipsoid conditioning
+        x0:       torch.Tensor,   # [B, T, 2]     clean trajectories
+        x_start:  torch.Tensor,   # [B, 2]         trajectory starts
+        x_goal:   torch.Tensor,   # [B, 2]         trajectory goals
+        occ_map:  torch.Tensor,   # [B, 1, H, W]   rasterized occupancy map
+        p_uncond: float = 0.1,    # probability of dropping map conditioning
     ):
         """
         Compute DSM loss with CFG dropout.
 
-        For each sample in the batch, ellipsoid conditioning is independently
-        zeroed out with probability p_uncond, enabling CFG at inference time.
+        For each sample in the batch, the occupancy map is independently
+        replaced with an all-zeros bitmap with probability p_uncond, enabling
+        CFG at inference time.
 
         Returns (loss_scalar, info_dict).
         """
@@ -89,16 +90,16 @@ class VEDiffusion(nn.Module):
         eps     = torch.randn_like(x0)                  # [B, T, 2]
         x_noisy = x0 + sigma[:, None, None] * eps       # [B, T, 2]
 
-        # CFG dropout: zero out ellipsoid conditioning per sample
+        # CFG dropout: blank out occupancy map per sample
         if p_uncond > 0.0:
             drop_mask = (torch.rand(B, device=device) < p_uncond)  # [B]
-            ellipsoids_dropped = ellipsoids.clone()
-            ellipsoids_dropped[drop_mask] = 0.0
+            occ_map_dropped = occ_map.clone()
+            occ_map_dropped[drop_mask] = 0.0
         else:
-            ellipsoids_dropped = ellipsoids
+            occ_map_dropped = occ_map
 
         # Predict noise
-        eps_pred = self.model(x_noisy, sigma, x_start, x_goal, ellipsoids_dropped)
+        eps_pred = self.model(x_noisy, sigma, x_start, x_goal, occ_map_dropped)
 
         loss = ((eps_pred - eps) ** 2).mean()
         info = {
