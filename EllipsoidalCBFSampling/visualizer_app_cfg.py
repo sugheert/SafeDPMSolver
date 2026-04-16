@@ -1,13 +1,13 @@
 """
 SafeDPMSolver CFG Visualiser — FastAPI Backend
 ===============================================
-Uses Classifier-Free Guidance (CFG) with ellipsoidal obstacle conditioning.
+Uses Classifier-Free Guidance (CFG) with rasterized occupancy-map conditioning.
 
-Plain DPM sampling uses CFG with ellipsoid conditioning:
+Plain DPM sampling uses CFG with rasterized-map conditioning:
     eps_guided = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
 
 Safe DPM sampling uses CFG as the base ODE, then applies the CBF safety
-filter using the same ellipsoid geometry.
+filter using the raw ellipsoid geometry.
 
 Run with:
     conda run -n py_3_10 uvicorn EllipsoidalCBFSampling.visualizer_app_cfg:app \
@@ -15,11 +15,11 @@ Run with:
         --reload-dir /home/earth/SDPMSP_Clone/EllipsoidalCBFSampling
 
 Endpoints:
-    GET  /                  -> redirect to /static/index.html
-    GET  /api/models        -> list available .pt checkpoints
-    POST /api/run           -> run CFG Plain + CFG+CBF Safe from identical prior
-    POST /api/batch_run     -> run N random-start/goal samples in one GPU batch
-    POST /api/math          -> re-evaluate CBF metrics for a given trajectory
+    GET  /                   -> redirect to /static/index.html
+    GET  /api/models         -> list available .pt checkpoints
+    POST /api/run            -> run CFG Plain + CFG+CBF Safe from identical prior
+    POST /api/batch_run      -> run N random-start/goal samples in one GPU batch
+    POST /api/math           -> re-evaluate CBF metrics for a given trajectory
     POST /api/recompute_ctrl -> recompute CBF + control for a modified trajectory
 """
 
@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+import numpy as np
 import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -61,13 +62,13 @@ from EllipsoidalCBFSampling.models.samplers_ellipsoids_cfg import (
     recompute_cbf_step,
 )
 from EllipsoidalCBFSampling.CBF.trajectory_cbf_ellipses import compute_cbf_metrics
+from EllipsoidalCBFSampling.rasterize import get_large_maze_wall_bitmap, rasterize_scene
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 CHECKPOINTS_DIR = PROJECT_DIR / 'checkpoints'
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-MAX_ELLIPSOIDS = 5      # DeepSet encoder fixed slot count (pad with zeros)
 
 # Default start / goal used when the caller does not specify them
 DEFAULT_START = [-0.8, -0.8]
@@ -76,7 +77,7 @@ DEFAULT_GOAL  = [0.8,  0.8]
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
-app = FastAPI(title='SafeDPMSolver CFG Visualiser', version='1.0.0')
+app = FastAPI(title='SafeDPMSolver CFG Visualiser', version='2.0.0')
 
 app.add_middleware(
     CORSMiddleware,
@@ -95,15 +96,16 @@ def root():
 
 # ---------------------------------------------------------------------------
 # Model cache  (loaded lazily, kept in memory)
+# Cache entry: (ema_model, ve, T_steps, wall_bitmap, map_h, map_w)
 # ---------------------------------------------------------------------------
 _model_cache: dict = {}
 
 
 def _load_model(model_name: str):
-    """Load and cache (ema_model, ve_diffusion, T_steps) for a given checkpoint name.
+    """Load and cache (ema_model, ve, T_steps, wall_bitmap, map_h, map_w).
 
-    Expects the diffuser-style checkpoint format with a 'config' key, as
-    saved by train_large_ellipsoids_diffuser.ipynb.
+    Expects the rasterized checkpoint format saved by train_large_ellipsoids_diffuser.ipynb,
+    with a 'config' key containing local_dim, global_dim, map_h, map_w, xy_min, xy_max.
     """
     if model_name in _model_cache:
         return _model_cache[model_name]
@@ -121,18 +123,21 @@ def _load_model(model_name: str):
 
     cfg     = ckpt['config']
     T_steps = cfg['T_steps']
+    map_h   = cfg.get('map_h', 64)
+    map_w   = cfg.get('map_w', 64)
 
     score_net = TemporalUnet(
         state_dim=2,
         T_steps=T_steps,
         unet_input_dim=cfg.get('unet_input_dim', 32),
         dim_mults=tuple(cfg.get('dim_mults', [1, 2, 4])),
-        ellipsoid_hidden_dim=cfg.get('ellipsoid_hidden_dim', 128),
-        ellipsoid_output_dim=cfg.get('ellipsoid_output_dim', 256),
+        local_dim=cfg.get('local_dim', 16),
+        global_dim=cfg.get('global_dim', 256),
     ).to(DEVICE)
 
     ema_model = copy.deepcopy(score_net).to(DEVICE)
-    ema_model.load_state_dict(ckpt['ema_model'])
+    ema_model.load_state_dict(ckpt['score_net'])
+
     ema_model.eval()
     for p in ema_model.parameters():
         p.requires_grad_(False)
@@ -144,33 +149,40 @@ def _load_model(model_name: str):
         n_levels=cfg.get('n_levels', 1000),
     ).to(DEVICE)
 
-    _model_cache[model_name] = (ema_model, ve, T_steps)
-    return ema_model, ve, T_steps
+    # Build and cache the wall bitmap using the normalisation stored in the checkpoint
+    xy_min   = np.array(cfg['xy_min'],  dtype=np.float32)
+    xy_max   = np.array(cfg['xy_max'],  dtype=np.float32)
+    xy_range = xy_max - xy_min
+    wall_bitmap = get_large_maze_wall_bitmap(xy_min, xy_range, map_h, map_w).to(DEVICE)
+
+    _model_cache[model_name] = (ema_model, ve, T_steps, wall_bitmap, map_h, map_w)
+    return ema_model, ve, T_steps, wall_bitmap, map_h, map_w
 
 
 # ---------------------------------------------------------------------------
-# Helper: pack obstacle list → [B, MAX_ELLIPSOIDS, 4] tensor for the model
+# Helper: rasterize API obstacles → [B, 1, H, W] occupancy map
+#
+# Obstacles from the frontend are already in normalised [-1, 1] space
+# (same coordinate system as start/goal), so no coordinate conversion is
+# needed — pass them directly to rasterize_scene.
 # ---------------------------------------------------------------------------
 
-def _pack_ellipsoids(obstacles: list, B: int) -> torch.Tensor:
-    """Convert a list of Obstacle objects to a [B, MAX_ELLIPSOIDS, 4] tensor.
-
-    The CFG model's DeepSet encoder expects exactly MAX_ELLIPSOIDS=5 slots.
-    Extra obstacles beyond the limit are silently truncated; missing slots
-    are zero-padded (zeros = null/absent obstacle).
-
-    Args:
-        obstacles : list of Obstacle pydantic objects (each has .x, .y, .a, .b)
-        B         : batch size — the [5, 4] template is expanded to [B, 5, 4]
-
-    Returns:
-        Tensor of shape [B, MAX_ELLIPSOIDS, 4] on DEVICE
-    """
-    data = [[obs.x, obs.y, obs.a, obs.b] for obs in obstacles[:MAX_ELLIPSOIDS]]
-    while len(data) < MAX_ELLIPSOIDS:
-        data.append([0.0, 0.0, 0.0, 0.0])
-    ell = torch.tensor(data, dtype=torch.float32, device=DEVICE)   # [5, 4]
-    return ell.unsqueeze(0).expand(B, -1, -1).contiguous()          # [B, 5, 4]
+def _build_occ_map(
+    obstacles:   list,
+    wall_bitmap: torch.Tensor,   # [1, 1, H, W]
+    map_h:       int,
+    map_w:       int,
+    B:           int = 1,
+) -> torch.Tensor:
+    """Rasterize API obstacles (normalised space) + walls → [B, 1, H, W]."""
+    data = [[obs.x, obs.y, obs.a, obs.b] for obs in obstacles]
+    if not data:
+        data = [[0.0, 0.0, 0.0, 0.0]]   # no obstacles → blank map (walls only)
+    ells = torch.tensor(data, dtype=torch.float32, device=DEVICE).unsqueeze(0)  # [1, N, 4]
+    occ = rasterize_scene(ells, wall_bitmap, map_h, map_w)   # [1, 1, H, W]
+    if B > 1:
+        occ = occ.expand(B, -1, -1, -1).contiguous()         # [B, 1, H, W]
+    return occ
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +272,7 @@ class Obstacle(BaseModel):
     b: float = 0.3
 
 class RunRequest(BaseModel):
-    model_name:     str   = 've_unet_largemaze_ellipsoids_diffuser_v2.pt'
+    model_name:     str   = 've_unet_largemaze_rasterized_v1.pt'
     n_steps:        int   = 20
     c:              float = 1.0
     k1:             float = 1.0
@@ -285,10 +297,10 @@ def run_optimisation(req: RunRequest):
     for both runs, plus per-step CBF metrics for the safe trajectory.
 
     The same UI-drawn obstacles serve two roles:
-      - ellipsoids [1, 5, 4] — fed into the score network (DeepSet encoder,
-        zero-padded to MAX_ELLIPSOIDS=5).  Controls the guided trajectory.
-      - obstacles  [N, 4]    — fed into the CBF math (trajectory_cbf,
-        grad_hXt_dXt).  Enforces the hard safety constraint.
+      - occ_map  [1, 1, H, W] — rasterized (walls + ellipsoids) fed to the score
+        network as the scene conditioning signal.
+      - obstacles [N, 4]      — raw geometry for CBF safety math (cx,cy,a,b in
+        normalised space, matching what was passed to the visualiser).
 
     Response shape:
         n_steps          : int
@@ -302,7 +314,7 @@ def run_optimisation(req: RunRequest):
         cbf_step_data    : [n_steps+1] dicts
     """
     try:
-        ema_model, ve, T_steps = _load_model(req.model_name)
+        ema_model, ve, T_steps, wall_bitmap, map_h, map_w = _load_model(req.model_name)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
@@ -310,8 +322,8 @@ def run_optimisation(req: RunRequest):
 
     k2 = max(req.k2, 1e-3)
 
-    # ellipsoids [1, 5, 4] — for model conditioning (CFG, zero-padded)
-    ellipsoids = _pack_ellipsoids(req.obstacles, B=1)
+    # occ_map [1, 1, H, W] — rasterized scene for model conditioning
+    occ_map = _build_occ_map(req.obstacles, wall_bitmap, map_h, map_w, B=1)
 
     # obstacles [N, 4] — raw geometry for CBF safety math
     obs_list  = [[obs.x, obs.y, obs.a, obs.b] for obs in req.obstacles]
@@ -337,7 +349,7 @@ def run_optimisation(req: RunRequest):
         _, plain_history = dpm_solver_1_cfg_sample(
             ema_model, ve,
             x_start=x_start, x_goal=x_goal,
-            ellipsoids=ellipsoids,
+            occ_map=occ_map,
             T_steps=T_steps, n_steps=req.n_steps,
             guidance_scale=req.guidance_scale,
             device=DEVICE, x_init=x_init.clone(),
@@ -350,7 +362,7 @@ def run_optimisation(req: RunRequest):
         _, safe_history, before_history, cbf_history = dpm_solver_1_cbf_cfg_sample(
             ema_model, ve,
             x_start=x_start, x_goal=x_goal,
-            ellipsoids=ellipsoids,
+            occ_map=occ_map,
             obstacles=obstacles,
             T_steps=T_steps, n_steps=req.n_steps,
             guidance_scale=req.guidance_scale,
@@ -387,7 +399,7 @@ def run_optimisation(req: RunRequest):
 # ---------------------------------------------------------------------------
 
 class BatchRunRequest(BaseModel):
-    model_name:     str   = 've_unet_largemaze_ellipsoids_diffuser_v2.pt'
+    model_name:     str   = 've_unet_largemaze_rasterized_v1.pt'
     n_steps:        int   = 20
     n_samples:      int   = 100
     c:              float = 1.0
@@ -407,11 +419,11 @@ def batch_run(req: BatchRunRequest):
     Run N independent trajectories (random starts/goals) in a single batched
     GPU forward pass.  Returns only final trajectories (no step history).
 
-    ellipsoids [N, 5, 4] — same obstacle set broadcast across all N samples.
-    obstacles  [M, 4]    — raw geometry for CBF safety filter.
+    occ_map  [N, 1, H, W] — same rasterized scene broadcast across all N samples.
+    obstacles [M, 4]       — raw geometry for CBF safety filter.
     """
     try:
-        ema_model, ve, T_steps = _load_model(req.model_name)
+        ema_model, ve, T_steps, wall_bitmap, map_h, map_w = _load_model(req.model_name)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
@@ -423,8 +435,8 @@ def batch_run(req: BatchRunRequest):
     if req.seed is not None:
         torch.manual_seed(req.seed)
 
-    # ellipsoids [N, 5, 4] — for model conditioning, same obstacles for all samples
-    ellipsoids = _pack_ellipsoids(req.obstacles, B=N)
+    # occ_map [N, 1, H, W] — same scene for all N samples
+    occ_map = _build_occ_map(req.obstacles, wall_bitmap, map_h, map_w, B=N)
 
     # obstacles [M, 4] — raw geometry for CBF
     obs_list  = [[obs.x, obs.y, obs.a, obs.b] for obs in req.obstacles]
@@ -447,7 +459,7 @@ def batch_run(req: BatchRunRequest):
         plain = dpm_solver_1_cfg_sample(
             ema_model, ve,
             x_start=starts, x_goal=goals,
-            ellipsoids=ellipsoids,
+            occ_map=occ_map,
             T_steps=T_steps, n_steps=req.n_steps,
             guidance_scale=req.guidance_scale,
             device=DEVICE, x_init=x_init.clone(),
@@ -459,7 +471,7 @@ def batch_run(req: BatchRunRequest):
         safe = dpm_solver_1_cbf_cfg_sample(
             ema_model, ve,
             x_start=starts, x_goal=goals,
-            ellipsoids=ellipsoids,
+            occ_map=occ_map,
             obstacles=obstacles,
             T_steps=T_steps, n_steps=req.n_steps,
             guidance_scale=req.guidance_scale,
@@ -485,7 +497,7 @@ def batch_run(req: BatchRunRequest):
         'gamma_delta': req.gamma_delta,
         'plain_time':  round(plain_time, 3),
         'safe_time':   round(safe_time,  3),
-        'mode':        'ellipsoids',
+        'mode':        'rasterized',
     }
 
 

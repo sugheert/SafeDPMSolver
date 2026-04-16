@@ -344,6 +344,20 @@ td.ctrl0-cell  { color: #64748b; }
 /* Markers */
 .start-mk    { fill: #3ddc84; }
 .goal-mk     { fill: #ffc107; }
+.marker-drag { cursor: grab; }
+.marker-drag:active { cursor: grabbing; }
+.marker-hit  { fill: transparent; }
+
+/* Run button — flashes when start/goal have been moved but not yet re-run */
+#run-btn.needs-rerun {
+  background: #c47a00;
+  animation: pulse-warn 1.1s ease-in-out infinite alternate;
+}
+#run-btn.needs-rerun:hover { background: #e08c00; }
+@keyframes pulse-warn {
+  from { box-shadow: 0 0 4px rgba(240,165,0,0.3); }
+  to   { box-shadow: 0 0 14px rgba(240,165,0,0.9); }
+}
 
 /* Ctrl crosshair cursor */
 body.ctrl-drag * { cursor: crosshair !important; }

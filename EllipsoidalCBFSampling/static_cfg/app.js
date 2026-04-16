@@ -21,6 +21,9 @@ const OBS_OFFSETS = [[0,0],[0.4,0],[-0.4,0],[0,0.4],[0,-0.4],[0.4,0.4],[-0.4,0.4
 let obstacles = [{ x: 0.0, y: 0.0, a: 0.3, b: 0.3 }];
 let params = { c: 1.0, k1: 1.0, k2: 1.0, gamma_delta: 0.05, alpha0: 1.0, guidance_scale: 3.0 };
 
+let startPos = [-0.8, -0.8];
+let goalPos  = [ 0.8,  0.8];
+
 function updateObsUI() {
   const container = document.getElementById('obs-list');
   if (!container) return;
@@ -295,9 +298,7 @@ function buildCanvases() {
 
   renderWallsOnAll();
   drawObstacleOnAll();
-  drawMarkersOn(svgP);
-  drawMarkersOn(svgB);
-  drawMarkersOn(svgA);
+  drawMarkersOnAll();
 
   // Attach canvas-wide drag for waypoints (before-canvas only)
   attachBeforeDrag();
@@ -451,14 +452,45 @@ function drawMarkersOn(svgSel) {
   const id = svgSel.attr('id');
   const g = svgSel.select(`#${id}-markers`);
   g.selectAll('*').remove();
-  if (!cachedData) return;
-  const [sx, sy] = cachedData.start;
-  const [gx, gy] = cachedData.goal;
-  g.append('rect').attr('class', 'start-mk')
-    .attr('x', xS(sx) - 6).attr('y', yS(sy) - 6).attr('width', 12).attr('height', 12).attr('rx', 2);
-  g.append('text')
-    .attr('x', xS(gx)).attr('y', yS(gy) + 6).attr('text-anchor', 'middle')
-    .attr('font-size', 18).attr('fill', '#ffc107').text('★');
+
+  const [sx, sy] = startPos;
+  const [gx, gy] = goalPos;
+
+  // Start marker — draggable square
+  const startEl = g.append('rect').attr('class', 'start-mk marker-drag')
+    .attr('x', xS(sx) - 7).attr('y', yS(sy) - 7).attr('width', 14).attr('height', 14).attr('rx', 2);
+
+  // Goal marker — invisible hit rect + star (pointer-events:none so the rect catches drags)
+  const goalHit = g.append('rect').attr('class', 'marker-hit marker-drag')
+    .attr('x', xS(gx) - 11).attr('y', yS(gy) - 14).attr('width', 22).attr('height', 22);
+  g.append('text').attr('class', 'goal-mk')
+    .attr('x', xS(gx)).attr('y', yS(gy) + 5).attr('text-anchor', 'middle')
+    .attr('font-size', 18).attr('pointer-events', 'none').text('★');
+
+  // Attach drag to both markers
+  [
+    { el: startEl, isStart: true  },
+    { el: goalHit, isStart: false },
+  ].forEach(({ el, isStart }) => {
+    el.call(
+      d3.drag()
+        .container(svgSel.node())
+        .on('start', function (event) { event.sourceEvent.stopPropagation(); })
+        .on('drag',  function (event) {
+          event.sourceEvent.stopPropagation();
+          const [wx, wy] = svgToWorld(event.x, event.y, svgSel);
+          if (isStart) startPos = [wx, wy]; else goalPos = [wx, wy];
+          drawMarkersOnAll();
+          setNeedsRerun(true);
+        })
+    );
+  });
+}
+
+function drawMarkersOnAll() {
+  drawMarkersOn(svgP);
+  drawMarkersOn(svgB);
+  drawMarkersOn(svgA);
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -470,9 +502,13 @@ function attachBeforeDrag() {
     .container(svgB.node())
     .filter(function (event) {
       if (!currentBeforeTraj) return false;
-      // Ignore if click originated on the draggable obstacle
+      // Ignore if click originated on a draggable obstacle or start/goal marker
       let el = event.sourceEvent && event.sourceEvent.target;
-      while (el) { if (el.id === 'before-svg-obstacle') return false; el = el.parentElement; }
+      while (el) {
+        if (el.id === 'before-svg-obstacle') return false;
+        if (el.id === 'before-svg-markers')  return false;
+        el = el.parentElement;
+      }
       return true;
     })
     .on('start', function (event) {
@@ -886,13 +922,17 @@ async function runOptimisation() {
         alpha0: params.alpha0, use_softplus: params.use_softplus,
         guidance_scale: params.guidance_scale,
         obstacles: obstacles,
-        start_x: -0.8, start_y: -0.8,
-        goal_x: 0.8, goal_y: 0.8,
+        start_x: startPos[0], start_y: startPos[1],
+        goal_x:  goalPos[0],  goal_y:  goalPos[1],
       }),
     });
     if (!res.ok) { const e = await res.json(); throw new Error(e.detail || res.statusText); }
 
     cachedData = await res.json();
+    // Sync positions with what the server actually used
+    startPos = cachedData.start.slice();
+    goalPos  = cachedData.goal.slice();
+    setNeedsRerun(false);
 
     scrubber.max = cachedData.n_steps;
     scrubber.disabled = false;
@@ -978,6 +1018,13 @@ let _recomputeTimer = null;
 function debouncedRecomputeUpdate() {
   clearTimeout(_recomputeTimer);
   _recomputeTimer = setTimeout(recomputeUpdate, 80);
+}
+
+/* ── Needs-rerun indicator ────────────────────────────────────────── */
+function setNeedsRerun(on) {
+  const btn = document.getElementById('run-btn');
+  btn.classList.toggle('needs-rerun', on);
+  btn.title = on ? 'Start/Goal moved — click Run to apply' : '';
 }
 
 /* ── Loading ──────────────────────────────────────────────────────── */
