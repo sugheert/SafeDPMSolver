@@ -1,24 +1,26 @@
 """
-score_net_ellipsoids.py — TemporalUnet conditioned on ellipsoidal obstacles.
+score_net_ellipsoids.py — TemporalUnet with local spatial conditioning for ellipsoidal obstacles.
 
-Extends models/score_net.py with a DeepSet-based ellipsoid encoder that
-encodes a set of up to 5 axis-aligned superellipsoid obstacles into a
-256-dim conditioning vector, appended to the existing sigma + start/goal
-conditioning.
+Implements the "Lightweight Local PointNet" strategy from the implementation plan
+(LocalSamplingImplementation.md). Replaces the global DeepSet FiLM encoder with a
+trajectory-aligned LightweightLocalEncoder that performs early fusion:
 
-Ellipsoid conditioning supports Classifier-Free Guidance (CFG): pass
-zeros([B, 5, 4]) as the null (unconditional) ellipsoid input.
+    1. For every waypoint x_t, compute raw relative geometry to every obstacle.
+    2. Pass through a shared MLP + max-pool (PointNet-style) → per-waypoint local vector l_t.
+    3. Concatenate l_t to x_t BEFORE the U-Net downsampling path (early fusion).
 
-Architecture additions:
-    EllipsoidFiLMEncoder: [B, 5, 4] -> [B, 256]
-        embed  : Linear(4 -> 128) + ReLU
-        layer1 : DeepSetLayer(128)      (equivariant)
-        layer2 : DeepSetLayer(128)      (equivariant)
-        rho    : max-pool + Linear(128->128) + ReLU + Linear(128->256)   (invariant)
-
-Modified TemporalUnet.forward signature:
+Modified TemporalUnet.forward signature (unchanged from previous version):
     forward(x, sigma, x_start, x_goal, ellipsoids)
-    where ellipsoids: [B, 5, 4]  — each row (cx, cy, a, b); pad missing with zeros
+    where ellipsoids: [B, N, 4]  — each row (cx, cy, a, b); zeros = null/unconditional
+
+Architecture:
+    LightweightLocalEncoder: [B, T, 2] x [B, N, 4] -> [B, T, d_local]
+        point_mlp : Linear(4 -> 128) + ReLU + Linear(128 -> 128) + ReLU   (per-pair)
+        max-pool  : over N obstacles  -> [B, T, 128]
+        proj_mlp  : Linear(128 -> 128) + ReLU + Linear(128 -> d_local)
+
+    TemporalUnet first conv input: state_dim + d_local  (early fusion)
+    cond_dim: time_emb_dim + conditioning_embed_dim  (no ellipsoid in global cond)
 """
 
 import math
@@ -30,7 +32,7 @@ from einops.layers.torch import Rearrange
 
 
 # ---------------------------------------------------------------------------
-# Helpers (unchanged from score_net.py)
+# Helpers (unchanged)
 # ---------------------------------------------------------------------------
 
 def group_norm_n_groups(n_channels, target_n_groups=8):
@@ -142,84 +144,95 @@ class ResidualTemporalBlock(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# DeepSet ellipsoid encoder
+# Lightweight Local PointNet encoder  (replaces EllipsoidFiLMEncoder)
 # ---------------------------------------------------------------------------
 
-class DeepSetLayer(nn.Module):
+class LightweightLocalEncoder(nn.Module):
     """
-    One equivariant DeepSet layer.
+    Computes per-waypoint local spatial features relative to a set of ellipsoids.
 
-    Applies a local linear transform (lambda) and adds a global context term
-    (gamma applied to the per-set max-pool), then activates with ReLU.
+    For each trajectory waypoint x_t and each obstacle o_i = (cx, cy, a, b):
+        f_{t,i} = [x_t - cx,  y_t - cy,  a,  b]   ∈ R^4
 
-    Input/output shape: [B, N, dim]  (N = number of set elements)
-    """
-    def __init__(self, dim):
-        super().__init__()
-        self.lam = nn.Linear(dim, dim)   # local (element-wise) weight
-        self.gam = nn.Linear(dim, dim)   # global (max-pool) weight
-
-    def forward(self, x):
-        # x: [B, N, dim]
-        local_part  = self.lam(x)                          # [B, N, dim]
-        global_max  = x.max(dim=1, keepdim=True)[0]        # [B, 1, dim]
-        global_part = self.gam(global_max)                 # [B, 1, dim]  (broadcast)
-        return F.relu(local_part + global_part)            # [B, N, dim]
-
-
-class EllipsoidFiLMEncoder(nn.Module):
-    """
-    Encodes a set of ellipsoid obstacles into a single scene-level vector.
-
-    Architecture:
-        embed  → Linear(input_dim → hidden_dim) + ReLU
-        layer1 → DeepSetLayer(hidden_dim)           (equivariant)
-        layer2 → DeepSetLayer(hidden_dim)           (equivariant)
-        rho    → max-pool over set dim (invariant)
-               → Linear(hidden_dim → hidden_dim) + ReLU
-               → Linear(hidden_dim → output_dim)
+    Processed through a shared MLP (λ_θ), max-pooled over obstacles (N dim),
+    then projected (γ_φ) to produce the local conditioning vector l_t:
+        e_{t,i} = λ_θ(f_{t,i})
+        z_t     = max_i(e_{t,i})
+        l_t     = γ_φ(z_t)  ∈ R^{d_local}
 
     Args:
-        input_dim  : 4  — each ellipsoid encoded as (cx, cy, a, b)
-        hidden_dim : 128
-        output_dim : 256
+        d_hidden : hidden dimension of point_mlp (128)
+        d_local  : output dimension per waypoint  (64)
 
     Forward:
-        x : [B, N, 4]  (N=5 for this project; pad absent ellipsoids with zeros)
-        returns [B, output_dim]
+        x         : [B, T, 2]    noisy trajectory waypoints
+        obstacles : [B, N, 4]    ellipsoid params (cx, cy, a, b)
+        returns   : [B, T, d_local]
     """
-    def __init__(self, input_dim: int = 4, hidden_dim: int = 128, output_dim: int = 256):
+    def __init__(self, d_hidden: int = 128, d_local: int = 64):
         super().__init__()
-        self.embedding = nn.Linear(input_dim, hidden_dim)
-        self.layer1    = DeepSetLayer(hidden_dim)
-        self.layer2    = DeepSetLayer(hidden_dim)
-        self.rho       = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+
+        # λ_theta: Shared MLP for pairwise relative features
+        self.point_mlp = nn.Sequential(
+            nn.Linear(4, d_hidden),
             nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim),
+            nn.Linear(d_hidden, d_hidden),
+            nn.ReLU(),
         )
 
-    def forward(self, x):
-        # x: [B, N, 4]
-        x = F.relu(self.embedding(x))   # [B, N, hidden_dim]
-        x = self.layer1(x)              # [B, N, hidden_dim]
-        x = self.layer2(x)              # [B, N, hidden_dim]
-        scene = x.max(dim=1)[0]         # [B, hidden_dim]  — invariant pooling
-        return self.rho(scene)          # [B, output_dim]
+        # γ_phi: Final projection after max-pooling
+        self.proj_mlp = nn.Sequential(
+            nn.Linear(d_hidden, d_hidden),
+            nn.ReLU(),
+            nn.Linear(d_hidden, d_local),
+        )
+
+    def forward(self, x: torch.Tensor, obstacles: torch.Tensor) -> torch.Tensor:
+        B, T, _ = x.shape
+        _, N, _ = obstacles.shape
+
+        if N == 0:
+            d_local = self.proj_mlp[-1].out_features
+            return torch.zeros(B, T, d_local, device=x.device)
+
+        # 1. Expand for pairwise interactions: [B, T, N, ...]
+        x_expanded   = x.unsqueeze(2).expand(B, T, N, 2)
+        obs_expanded = obstacles.unsqueeze(1).expand(B, T, N, 4)
+
+        dx = x_expanded[..., 0] - obs_expanded[..., 0]   # x - cx
+        dy = x_expanded[..., 1] - obs_expanded[..., 1]   # y - cy
+        a  = obs_expanded[..., 2]
+        b  = obs_expanded[..., 3]
+
+        # Raw relative features -> [B, T, N, 4]
+        rel_features = torch.stack([dx, dy, a, b], dim=-1)
+
+        # 2. Shared point MLP -> [B, T, N, d_hidden]
+        e = self.point_mlp(rel_features)
+
+        # 3. Symmetric max-pool over N -> [B, T, d_hidden]
+        z = torch.max(e, dim=2)[0]
+
+        # 4. Final projection -> [B, T, d_local]
+        return self.proj_mlp(z)
 
 
 # ---------------------------------------------------------------------------
-# Temporal U-Net with ellipsoid conditioning
+# Temporal U-Net with local spatial conditioning (early fusion)
 # ---------------------------------------------------------------------------
 
 class TemporalUnet(nn.Module):
     """
-    MPD-style 1D temporal U-Net for trajectory denoising, adapted for VE-SDE
-    with additional DeepSet-based ellipsoid obstacle conditioning.
+    MPD-style 1D temporal U-Net for trajectory denoising with local spatial
+    conditioning via early feature fusion (LightweightLocalEncoder).
 
-    Conditioning vector fed to every ResidualTemporalBlock:
-        c_emb = cat(TimeEncoder(sigma), Linear(cat(x_start,x_goal)), EllipsoidFiLMEncoder(ellipsoids))
-        cond_dim = time_emb_dim + conditioning_embed_dim + ellipsoid_output_dim
+    Early fusion: local features l_t ∈ R^{d_local} are concatenated to each
+    waypoint x_t BEFORE the first convolution, so the U-Net sees
+    [x_t || l_t] ∈ R^{state_dim + d_local} as its spatial input channel.
+
+    Global conditioning (time + start/goal) is still injected at every
+    ResidualTemporalBlock via the cond_dim vector, but ellipsoids are no longer
+    part of the global context.
 
     Args:
         state_dim              : spatial dims per waypoint (2 for x,y)
@@ -227,9 +240,9 @@ class TemporalUnet(nn.Module):
         unet_input_dim         : base channel width (32)
         dim_mults              : channel multipliers per U-Net level ((1,2,4))
         time_emb_dim           : output dim of the sigma (time) encoder (32)
-        conditioning_embed_dim : dim to project cat(x_start,x_goal) into (4)
-        ellipsoid_hidden_dim   : hidden dim of EllipsoidFiLMEncoder (128)
-        ellipsoid_output_dim   : output dim of EllipsoidFiLMEncoder (256)
+        conditioning_embed_dim : dim to project cat(x_start, x_goal) into (4)
+        local_hidden_dim       : hidden dim of LightweightLocalEncoder (128)
+        local_dim              : per-waypoint output dim of local encoder (64)
     """
 
     def __init__(
@@ -240,27 +253,30 @@ class TemporalUnet(nn.Module):
         dim_mults:              tuple = (1, 2, 4),
         time_emb_dim:           int   = 32,
         conditioning_embed_dim: int   = 4,
-        ellipsoid_hidden_dim:   int   = 128,
-        ellipsoid_output_dim:   int   = 256,
+        local_hidden_dim:       int   = 128,
+        local_dim:              int   = 64,
     ):
         super().__init__()
         self.state_dim = state_dim
         self.T_steps   = T_steps
+        self.local_dim = local_dim
 
-        # ---- Conditioning ----
+        # ---- Global conditioning (time + start/goal) ----
         self.context_proj = nn.Linear(state_dim * 2, conditioning_embed_dim)
         self.time_mlp     = TimeEncoder(dim=32, dim_out=time_emb_dim)
-        self.ellipsoid_encoder = EllipsoidFiLMEncoder(
-            input_dim=4,
-            hidden_dim=ellipsoid_hidden_dim,
-            output_dim=ellipsoid_output_dim,
+
+        # cond_dim fed to every ResidualTemporalBlock (no ellipsoid contribution)
+        cond_dim = time_emb_dim + conditioning_embed_dim
+
+        # ---- Local encoder (early fusion) ----
+        self.local_encoder = LightweightLocalEncoder(
+            d_hidden=local_hidden_dim,
+            d_local=local_dim,
         )
 
-        # cond_dim fed to every ResidualTemporalBlock
-        cond_dim = time_emb_dim + conditioning_embed_dim + ellipsoid_output_dim
-
-        # ---- Channel dims ----
-        dims   = [state_dim, *[unet_input_dim * m for m in dim_mults]]
+        # ---- Channel dims: first level receives state_dim + local_dim ----
+        fused_input_dim = state_dim + local_dim
+        dims   = [fused_input_dim, *[unet_input_dim * m for m in dim_mults]]
         in_out = list(zip(dims[:-1], dims[1:]))
 
         # ---- Down path ----
@@ -305,35 +321,40 @@ class TemporalUnet(nn.Module):
         sigma:      torch.Tensor,   # [B]          noise level
         x_start:    torch.Tensor,   # [B, 2]       start condition
         x_goal:     torch.Tensor,   # [B, 2]       goal  condition
-        ellipsoids: torch.Tensor,   # [B, 5, 4]    ellipsoid set (cx,cy,a,b); zeros = null
+        ellipsoids: torch.Tensor,   # [B, N, 4]    ellipsoid set (cx,cy,a,b); zeros = null
     ) -> torch.Tensor:
         """Returns predicted noise eps : [B, T, 2]."""
 
-        t_emb        = self.time_mlp(sigma)                                    # [B, time_emb_dim]
-        ctx          = self.context_proj(torch.cat([x_start, x_goal], dim=-1)) # [B, cond_emb_dim]
-        ellipsoid_emb = self.ellipsoid_encoder(ellipsoids)                     # [B, ellipsoid_output_dim]
-        c_emb        = torch.cat([t_emb, ctx, ellipsoid_emb], dim=-1)          # [B, cond_dim]
+        # 1. Global conditioning (time + start/goal)
+        t_emb = self.time_mlp(sigma)                                    # [B, time_emb_dim]
+        ctx   = self.context_proj(torch.cat([x_start, x_goal], dim=-1)) # [B, cond_emb_dim]
+        c_emb = torch.cat([t_emb, ctx], dim=-1)                         # [B, cond_dim]
 
-        x = rearrange(x, 'b t d -> b d t')   # [B, 2, T]
+        # 2. Local conditioning — early fusion
+        local_features = self.local_encoder(x, ellipsoids)              # [B, T, local_dim]
+        x_fused = torch.cat([x, local_features], dim=-1)                # [B, T, state_dim+local_dim]
+
+        # 3. Rearrange for 1D convolutions
+        x_in = rearrange(x_fused, 'b t d -> b d t')                    # [B, state_dim+local_dim, T]
 
         skips = []
         for resnet1, resnet2, downsample in self.downs:
-            x = resnet1(x, c_emb)
-            x = resnet2(x, c_emb)
-            skips.append(x)
-            x = downsample(x)
+            x_in = resnet1(x_in, c_emb)
+            x_in = resnet2(x_in, c_emb)
+            skips.append(x_in)
+            x_in = downsample(x_in)
 
-        x = self.mid_block1(x, c_emb)
-        x = self.mid_block2(x, c_emb)
+        x_in = self.mid_block1(x_in, c_emb)
+        x_in = self.mid_block2(x_in, c_emb)
 
         for resnet1, resnet2, upsample in self.ups:
-            x = torch.cat([x, skips.pop()], dim=1)
-            x = resnet1(x, c_emb)
-            x = resnet2(x, c_emb)
-            x = upsample(x)
+            x_in = torch.cat([x_in, skips.pop()], dim=1)
+            x_in = resnet1(x_in, c_emb)
+            x_in = resnet2(x_in, c_emb)
+            x_in = upsample(x_in)
 
-        x = self.final_conv(x)                # [B, 2, T]
-        return rearrange(x, 'b d t -> b t d') # [B, T, 2]
+        x_in = self.final_conv(x_in)                     # [B, 2, T]
+        return rearrange(x_in, 'b d t -> b t d')         # [B, T, 2]
 
 
 # Alias for backward-compat
