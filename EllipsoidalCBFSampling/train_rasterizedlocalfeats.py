@@ -73,13 +73,13 @@ N_LEVELS  = 1000
 
 # ---- CFG ----
 P_UNCOND       = 0.1
-GUIDANCE_SCALE = 0.6
+GUIDANCE_SCALE = 1.0
 
 # ---- Training ----
-BATCH_SIZE       = 128
+BATCH_SIZE       = 64
 LR               = 3e-4
-TOTAL_STEPS      = 1_000_000
-EMA_DECAY        = 0.9999
+TOTAL_STEPS      = 500_000
+EMA_DECAY        = 0.995
 EMA_START_STEP   = 5_000
 EMA_UPDATE_EVERY = 10
 
@@ -89,10 +89,10 @@ N_SAMPLE_STEPS = 25
 # ---- Logging / checkpointing ----
 LOG_EVERY     = 100
 PREVIEW_EVERY = 5_000
-SAVE_EVERY    = 10_000
+SAVE_EVERY    = 5_000
 
 CKPT_DIR = os.path.join(_NOTEBOOK_DIR, "checkpoints", "rasterized_localfeats")
-RUNS_DIR = os.path.join(_NOTEBOOK_DIR, "runs_localfeats")
+RUNS_DIR = os.path.join(_NOTEBOOK_DIR, "runs")
 
 
 # ===========================================================================
@@ -354,12 +354,12 @@ def main():
     # Fixed preview samples — drawn from eval dataset, renormalized to training space
     # -----------------------------------------------------------------------
     rng_fix  = np.random.default_rng(42)
-    fix_idx  = rng_fix.choice(len(ds_eval), size=4, replace=False).tolist()
+    fix_idx  = rng_fix.choice(len(ds_eval), size=10, replace=False).tolist()
 
     fix_trajs_eval, fix_occ_eval = zip(*[ds_eval[i] for i in fix_idx])
-    fix_trajs_eval = torch.stack(fix_trajs_eval)   # [4, T, 2] — eval normalised space
-    fix_occ        = torch.stack(fix_occ_eval).to(device)    # [4, 1, H, W]
-    fix_ells_world = ds_eval.ellipsoids_world[fix_idx]        # [4, n_ell, 4] numpy
+    fix_trajs_eval = torch.stack(fix_trajs_eval)   # [10, T, 2] — eval normalised space
+    fix_occ        = torch.stack(fix_occ_eval).to(device)    # [10, 1, H, W]
+    fix_ells_world = ds_eval.ellipsoids_world[fix_idx]        # [10, n_ell, 4] numpy
 
     # Renormalize trajectories from eval space to training space
     fix_trajs_world = ds_eval.unnormalize(fix_trajs_eval)
@@ -373,7 +373,7 @@ def main():
     # -----------------------------------------------------------------------
     writer = SummaryWriter(log_dir=RUNS_DIR)
     print(f"\nTensorBoard logs: {RUNS_DIR}")
-    print("  tensorboard --logdir EllipsoidalCBFSampling/runs_localfeats")
+    print("  tensorboard --logdir EllipsoidalCBFSampling/runs")
     print("  http://localhost:6006\n")
 
     # -----------------------------------------------------------------------
@@ -414,6 +414,9 @@ def main():
             with torch.no_grad():
                 for p_ema, p in zip(ema_model.parameters(), score_net.parameters()):
                     p_ema.data.mul_(EMA_DECAY).add_(p.data, alpha=1.0 - EMA_DECAY)
+                
+                for b_ema, b in zip(ema_model.buffers(), score_net.buffers()):
+                    b_ema.data.copy_(b.data)
 
         loss_val = info["loss"]
         loss_history.append(loss_val)
