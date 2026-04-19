@@ -79,7 +79,7 @@ GUIDANCE_SCALE = 1.0
 BATCH_SIZE       = 64
 LR               = 3e-4
 TOTAL_STEPS      = 500_000
-EMA_DECAY        = 0.995
+EMA_DECAY        = 0.999
 EMA_START_STEP   = 5_000
 EMA_UPDATE_EVERY = 10
 
@@ -207,47 +207,62 @@ def _draw_ellipsoid(ax, cx, cy, a, b, color="steelblue", alpha=0.4):
 
 
 def _fig_to_tensor(fig):
+    """Convert a matplotlib figure to a [3, H, W] uint8 tensor."""
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=80, bbox_inches="tight")
     buf.seek(0)
     import PIL.Image
     img = PIL.Image.open(buf).convert("RGB")
     arr = np.array(img)
-    return torch.tensor(arr).permute(2, 0, 1)
+    return torch.tensor(arr).permute(2, 0, 1)   # [3, H, W]
 
 
-def build_preview_figure(
-    ema_model, ve, ds_train,
+def build_preview_images(
+    model, ve, ds,
     fix_xs, fix_xg, fix_occ, fix_ells_world,
     step, device,
+    label="",
 ):
-    """Sample 4 trajectories from the eval set and return a matplotlib figure."""
-    ema_model.eval()
-    n = fix_xs.shape[0]
+    """
+    Sample one trajectory per fixed conditioning pair.
 
-    fig, axes = plt.subplots(1, n, figsize=(5 * n, 5))
-    fig.suptitle(
-        f"Step {step:,}  —  DPM-Solver-1 CFG  "
-        f"(w={GUIDANCE_SCALE}, {N_SAMPLE_STEPS} steps)  [eval set]",
-        fontsize=11,
-    )
+    Returns a [N, 3, H, W] uint8 tensor suitable for writer.add_images().
+    Each image is an independent single-panel figure (maze + ellipsoids + trajectory).
+
+    Args:
+        model          : score_net or ema_model (set to eval mode internally)
+        ve             : VEDiffusion wrapper
+        ds             : training dataset — used only for unnormalize / horizon
+        fix_xs         : [N, 2]      start positions in train-norm space
+        fix_xg         : [N, 2]      goal  positions in train-norm space
+        fix_occ        : [N, 1, H, W] occupancy maps (on device)
+        fix_ells_world : [N, n_ell, 4] numpy — ellipsoid params in world coords
+        step           : current training step (used for subplot title)
+        device         : torch device
+        label          : short string included in each subplot title
+    """
+    model.eval()
+    n    = fix_xs.shape[0]
+    imgs = []
 
     with torch.no_grad():
-        for j, ax in enumerate(axes):
+        for j in range(n):
             samp = dpm_solver_1_cfg_sample(
-                ema_model, ve,
-                x_start=fix_xs[j:j+1], x_goal=fix_xg[j:j+1],
+                model, ve,
+                x_start=fix_xs[j:j+1],
+                x_goal=fix_xg[j:j+1],
                 occ_map=fix_occ[j:j+1],
-                T_steps=ds_train.horizon,
+                T_steps=ds.horizon,
                 n_steps=N_SAMPLE_STEPS,
                 guidance_scale=GUIDANCE_SCALE,
                 device=device,
-            )   # [1, T, 2]  — in training-norm space
+            )   # [1, T, 2] — train-norm space
 
-            world = ds_train.unnormalize(samp.cpu())
-            xs_w  = ds_train.unnormalize(fix_xs[j:j+1].cpu())
-            xg_w  = ds_train.unnormalize(fix_xg[j:j+1].cpu())
+            world = ds.unnormalize(samp.cpu())
+            xs_w  = ds.unnormalize(fix_xs[j:j+1].cpu())
+            xg_w  = ds.unnormalize(fix_xg[j:j+1].cpu())
 
+            fig, ax = plt.subplots(1, 1, figsize=(5, 5))
             _draw_maze(ax)
             for row in fix_ells_world[j]:
                 cx, cy, a, b = row
@@ -257,11 +272,14 @@ def build_preview_figure(
             ax.plot(world[0, :, 0], world[0, :, 1], lw=1.2, color="steelblue", alpha=0.85)
             ax.scatter(xs_w[0, 0], xs_w[0, 1], c="green", s=60, zorder=5)
             ax.scatter(xg_w[0, 0], xg_w[0, 1], c="red",   s=60, zorder=5)
-            ax.set_title(f"eval pair {j}")
+            ax.set_title(f"step {step:,}  {label}  pair {j}", fontsize=8)
             ax.set_aspect("equal")
+            plt.tight_layout()
 
-    plt.tight_layout()
-    return fig
+            imgs.append(_fig_to_tensor(fig))   # [3, H, W]
+            plt.close(fig)
+
+    return torch.stack(imgs)   # [N, 3, H, W]
 
 
 # ===========================================================================
@@ -351,30 +369,55 @@ def main():
         print(f"TemporalUnet params: {n_params:,}")
 
     # -----------------------------------------------------------------------
-    # Fixed preview samples — drawn from eval dataset, renormalized to training space
+    # Fixed preview samples — eval set (renormalised to training space)
     # -----------------------------------------------------------------------
-    rng_fix  = np.random.default_rng(42)
-    fix_idx  = rng_fix.choice(len(ds_eval), size=10, replace=False).tolist()
+    rng_fix       = np.random.default_rng(42)
+    fix_idx_eval  = rng_fix.choice(len(ds_eval), size=10, replace=False).tolist()
+    fix_idx_train = rng_fix.choice(len(ds),      size=10, replace=False).tolist()
 
-    fix_trajs_eval, fix_occ_eval = zip(*[ds_eval[i] for i in fix_idx])
-    fix_trajs_eval = torch.stack(fix_trajs_eval)   # [10, T, 2] — eval normalised space
-    fix_occ        = torch.stack(fix_occ_eval).to(device)    # [10, 1, H, W]
-    fix_ells_world = ds_eval.ellipsoids_world[fix_idx]        # [10, n_ell, 4] numpy
+    # --- Eval fixed samples ---
+    _eval_trajs, _eval_occs = zip(*[ds_eval[i] for i in fix_idx_eval])
+    _eval_trajs   = torch.stack(_eval_trajs)                          # [10, T, 2] eval-norm
+    fix_occ_eval  = torch.stack(_eval_occs).to(device)               # [10, 1, H, W]
+    fix_ells_eval = ds_eval.ellipsoids_world[fix_idx_eval]            # [10, n_ell, 4] numpy
 
-    # Renormalize trajectories from eval space to training space
-    fix_trajs_world = ds_eval.unnormalize(fix_trajs_eval)
-    fix_trajs       = ds.normalize(fix_trajs_world)
+    # Renormalize eval trajectories into train-norm space
+    _eval_world   = ds_eval.unnormalize(_eval_trajs)
+    _eval_train   = ds.normalize(_eval_world)
+    fix_xs_eval   = _eval_train[:, 0,  :].to(device)                 # [10, 2]
+    fix_xg_eval   = _eval_train[:, -1, :].to(device)                 # [10, 2]
 
-    fix_xs = fix_trajs[:, 0, :].to(device)
-    fix_xg = fix_trajs[:, -1, :].to(device)
+    # --- Train fixed samples ---
+    _train_trajs, _train_occs = zip(*[ds[i] for i in fix_idx_train])
+    _train_trajs   = torch.stack(_train_trajs)                        # [10, T, 2] train-norm
+    fix_occ_train  = torch.stack(_train_occs).to(device)             # [10, 1, H, W]
+    fix_ells_train = ds.ellipsoids_world[fix_idx_train]               # [10, n_ell, 4] numpy
+
+    fix_xs_train   = _train_trajs[:, 0,  :].to(device)               # [10, 2]
+    fix_xg_train   = _train_trajs[:, -1, :].to(device)               # [10, 2]
 
     # -----------------------------------------------------------------------
-    # TensorBoard writer
+    # TensorBoard writer + model graph
     # -----------------------------------------------------------------------
     writer = SummaryWriter(log_dir=RUNS_DIR)
     print(f"\nTensorBoard logs: {RUNS_DIR}")
     print("  tensorboard --logdir EllipsoidalCBFSampling/runs")
     print("  http://localhost:6006\n")
+
+    # Add the score_net computation graph (runs once at startup)
+    _dummy_x     = torch.zeros(1, T_STEPS, 2,       device=device)
+    _dummy_sigma = torch.ones(1,                     device=device)
+    _dummy_xs    = torch.zeros(1, 2,                 device=device)
+    _dummy_xg    = torch.zeros(1, 2,                 device=device)
+    _dummy_occ   = torch.zeros(1, 1, MAP_H, MAP_W,  device=device)
+    try:
+        writer.add_graph(
+            score_net,
+            (_dummy_x, _dummy_sigma, _dummy_xs, _dummy_xg, _dummy_occ),
+        )
+        print("  model graph written to TensorBoard")
+    except Exception as e:
+        print(f"  [warn] add_graph failed: {e}")
 
     # -----------------------------------------------------------------------
     # Training loop
@@ -414,7 +457,6 @@ def main():
             with torch.no_grad():
                 for p_ema, p in zip(ema_model.parameters(), score_net.parameters()):
                     p_ema.data.mul_(EMA_DECAY).add_(p.data, alpha=1.0 - EMA_DECAY)
-                
                 for b_ema, b in zip(ema_model.buffers(), score_net.buffers()):
                     b_ema.data.copy_(b.data)
 
@@ -440,15 +482,27 @@ def main():
                 sps=f"{sps:.1f}",
             )
 
+        # -------------------------------------------------------------------
+        # Preview: 4 combinations × 10 images each
+        # -------------------------------------------------------------------
         if step % PREVIEW_EVERY == 0:
-            fig = build_preview_figure(
-                ema_model, ve, ds,
-                fix_xs, fix_xg, fix_occ, fix_ells_world,
-                step, device,
-            )
-            img_tensor = _fig_to_tensor(fig)
-            writer.add_image("samples/trajectories", img_tensor, step)
-            plt.close(fig)
+            _preview_sets = [
+                # (tag_suffix,           model,     xs,           xg,           occ,           ells)
+                ("score_net/train", score_net, fix_xs_train, fix_xg_train, fix_occ_train, fix_ells_train),
+                ("score_net/eval",  score_net, fix_xs_eval,  fix_xg_eval,  fix_occ_eval,  fix_ells_eval),
+                ("ema_model/train", ema_model, fix_xs_train, fix_xg_train, fix_occ_train, fix_ells_train),
+                ("ema_model/eval",  ema_model, fix_xs_eval,  fix_xg_eval,  fix_occ_eval,  fix_ells_eval),
+            ]
+
+            for tag, mdl, xs, xg, occ, ells in _preview_sets:
+                imgs = build_preview_images(
+                    mdl, ve, ds,
+                    xs, xg, occ, ells,
+                    step, device,
+                    label=tag,
+                )   # [10, 3, H, W]
+                writer.add_images(f"samples/{tag}", imgs, step)
+
             score_net.train()
 
         if step % SAVE_EVERY == 0:
