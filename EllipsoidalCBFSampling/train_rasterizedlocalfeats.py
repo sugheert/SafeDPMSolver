@@ -414,6 +414,8 @@ def main():
             with torch.no_grad():
                 for p_ema, p in zip(ema_model.parameters(), score_net.parameters()):
                     p_ema.data.mul_(EMA_DECAY).add_(p.data, alpha=1.0 - EMA_DECAY)
+                for b_ema, b in zip(ema_model.buffers(), score_net.buffers()):
+                    b_ema.data.copy_(b.data)
 
         loss_val = info["loss"]
         loss_history.append(loss_val)

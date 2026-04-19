@@ -5,7 +5,7 @@ Replaces the global average-pool FiLM conditioning of score_net_ellipsoids.py wi
 per-waypoint local feature sampling:
 
     1. MapEncoder encodes the binary occupancy map into a spatial feature map
-       [B, local_dim, H/8, W/8].
+       [B, local_dim, H, W] (full resolution via Micro U-Net).
     2. sample_local_features bilinearly samples that map at each noisy waypoint
        position → [B, T, local_dim].
     3. The local features are concatenated to the waypoint input before the U-Net:
@@ -14,7 +14,7 @@ per-waypoint local feature sampling:
 
 Architecture:
     occ_map [B, 1, H, W]
-        → MapEncoder            → feat_map [B, local_dim, H/8, W/8]
+        → MapEncoder            → feat_map [B, local_dim, H, W]
         → sample_local_features ← noisy waypoints [B, T, 2]
         → local_feat [B, T, local_dim]
         → cat([x, local_feat])  → x_in [B, T, state_dim+local_dim]
@@ -32,7 +32,6 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.models as tvm
 from einops import rearrange
 from einops.layers.torch import Rearrange
 
@@ -186,31 +185,51 @@ class EllipsoidFiLMEncoder(nn.Module):
 # CNN occupancy-map encoder
 # ---------------------------------------------------------------------------
 
+class DoubleConv(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
 class MapEncoder(nn.Module):
     """
-    Encodes a binary occupancy bitmap into a spatial feature map.
+    Encodes a binary occupancy bitmap into a full-resolution spatial feature map.
 
     Input  : [B, 1, H, W]
-    Output : [B, local_dim, H/8, W/8]   (8×8 for H=W=64)
+    Output : [B, local_dim, H, W]   (64×64 for H=W=64)
+
+    Micro U-Net with skip connections preserves spatial resolution end-to-end.
     """
     def __init__(self, local_dim: int = 16):
         super().__init__()
-        resnet = tvm.resnet18(weights=None)
-        resnet.conv1 = nn.Conv2d(
-            1, 64, kernel_size=7, stride=2, padding=3, bias=False
-        )
-        self.backbone = nn.Sequential(
-            resnet.conv1,
-            resnet.bn1,
-            resnet.relu,
-            resnet.maxpool,
-            resnet.layer1,   # [B, 64,  H/4,  W/4]
-            resnet.layer2,   # [B, 128, H/8,  W/8]
-        )
-        self.proj = nn.Conv2d(128, local_dim, kernel_size=1)
+        self.down1   = DoubleConv(1, 16)
+        self.pool1   = nn.MaxPool2d(2)
+        self.down2   = DoubleConv(16, 32)
+        self.pool2   = nn.MaxPool2d(2)
+        self.bottle  = DoubleConv(32, 64)
+        self.up1     = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+        self.conv_u1 = DoubleConv(64, 32)   # 32 up + 32 skip
+        self.up2     = nn.ConvTranspose2d(32, 16, kernel_size=2, stride=2)
+        self.conv_u2 = DoubleConv(32, 16)   # 16 up + 16 skip
+        self.out     = nn.Conv2d(16, local_dim, kernel_size=1)
 
     def forward(self, occ_map: torch.Tensor) -> torch.Tensor:
-        return self.proj(self.backbone(occ_map))   # [B, local_dim, H/8, W/8]
+        s1 = self.down1(occ_map)              # [B, 16, H,   W  ]
+        s2 = self.down2(self.pool1(s1))       # [B, 32, H/2, W/2]
+        x  = self.bottle(self.pool2(s2))      # [B, 64, H/4, W/4]
+        x  = self.conv_u1(torch.cat([self.up1(x), s2], dim=1))  # [B, 32, H/2, W/2]
+        x  = self.conv_u2(torch.cat([self.up2(x), s1], dim=1))  # [B, 16, H,   W  ]
+        return self.out(x)                    # [B, local_dim, H, W]
 
 
 class GlobalPoolHead(nn.Module):
