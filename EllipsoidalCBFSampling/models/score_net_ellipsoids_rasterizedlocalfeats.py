@@ -242,12 +242,13 @@ def sample_local_features(
     F.grid_sample expects a grid of shape [B, H_out, W_out, 2].
     We treat T waypoints as W_out and set H_out=1.
     """
-    grid  = positions.unsqueeze(1)                        # [B, 1, T, 2]
+    clamped_pos = torch.clamp(positions, -1.1, 1.1)
+    grid = clamped_pos.unsqueeze(1) 
     feats = F.grid_sample(
         feat_map, grid,
         mode='bilinear',
         align_corners=True,
-        padding_mode='zeros',
+        padding_mode='border',
     )                                                     # [B, C, 1, T]
     return feats.squeeze(2).permute(0, 2, 1)              # [B, T, C]
 
